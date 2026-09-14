@@ -109,3 +109,37 @@ Notes from building and reviewing this bridge. All of it was measured against
 - Distinguish "parsed but has no refresh_token" from "did not parse", and list
   the keys that *were* found: `client_id`/`client_secret` means the OAuth client
   file was stored instead of the token, which is a different fix.
+
+## `callTool` resolves with `isError`; it does not throw
+
+- A boot credential check written as `try { await callTool(...) } catch {}` logged
+  `credential verified` for a call that had come back 403. `callTool` only
+  rejects on a *transport* failure; a tool failure is a normal resolved result
+  carrying `isError: true`.
+- That is the exact false-green the check existed to prevent, so it is worth
+  stating plainly: **check `result.isError`, not just that the promise settled.**
+
+## The upstream's tool errors never reach stderr
+
+- FastMCP's `log.error` sends an MCP `notifications/message`, not a write to
+  stderr. So draining the child's stderr — which is worth doing for boot
+  failures — captures nothing at all for a failing tool call, and `docker logs`
+  stays empty while the model reports an error nobody can corroborate.
+- The relay is the only place that sees every result, so it logs any result
+  carrying `isError`. Without that, the only account of a failure is whatever
+  the model chose to say about it.
+
+## A 403 from Google is two different problems wearing one message
+
+- `@a-bonus/google-docs-mcp` turns any `error.code === 403` into
+  `"Permission denied. Make sure you have granted Google Drive access to the
+  application."` and discards Google's actual reason.
+- The two real causes need opposite fixes: `SERVICE_DISABLED` means the API is
+  not enabled on the OAuth client's Cloud **project**, and
+  `ACCESS_TOKEN_SCOPE_INSUFFICIENT` means consent did not grant the scope.
+- Do not diagnose this with a live probe. Google's auth layer rejects on scope
+  before it checks whether the API is enabled, so a scope-limited token returns
+  the same 403 whether the API is on or off. `gcloud services list --enabled
+  --project=<project>` is the authoritative answer.
+- Creating a *new* OAuth client for a service is the usual way to land here: the
+  new client belongs to a project where those APIs were never enabled.

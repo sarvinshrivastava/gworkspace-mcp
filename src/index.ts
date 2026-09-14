@@ -282,6 +282,17 @@ function stripAttendees(args: Record<string, unknown>): Record<string, unknown> 
   return { ...rest, sendUpdates: "none" };
 }
 
+/** The text of a tool result, for logging. Truncated; never the arguments. */
+function describeResult(result: unknown): string {
+  const content = (result as { content?: Array<{ type?: string; text?: string }> })
+    .content;
+  if (!Array.isArray(content)) return "(no content)";
+  return content
+    .map((part) => (part.type === "text" ? part.text : `<${part.type}>`))
+    .join(" ")
+    .slice(0, 300);
+}
+
 const fail = (why: string) => ({
   content: [{ type: "text" as const, text: `Failed: ${why}` }],
   isError: true,
@@ -317,6 +328,14 @@ function createServer(): McpServer {
             name: tool.name,
             arguments: callArgs,
           });
+          // The upstream reports tool failures through FastMCP's log channel,
+          // which is an MCP notification rather than stderr — so a failing call
+          // left NOTHING in docker logs and the only account of it was whatever
+          // the model chose to say. The relay sees every result, so it logs the
+          // failures here.
+          if ((result as { isError?: boolean }).isError) {
+            console.error(`[tool] ${tool.name} FAILED: ${describeResult(result)}`);
+          }
           return result as CallToolResult;
         } catch (error) {
           return fail(error instanceof Error ? error.message : String(error));
@@ -437,14 +456,26 @@ async function main() {
   // call turns that into a line in the log at the moment it becomes true.
   // Deliberately not fatal: a Google blip should not crash-loop the container.
   try {
-    await upstream?.callTool({
+    const probe = await upstream?.callTool({
       name: "listDocuments",
       arguments: { maxResults: 1 },
     });
-    console.log("[upstream] credential verified");
+    // callTool RESOLVES with isError: true for a tool failure — it only throws
+    // on a transport failure. Checking the promise alone reported "verified"
+    // for a call that had actually come back 403.
+    if (probe && (probe as { isError?: boolean }).isError) {
+      console.error(
+        `[upstream] CREDENTIAL CHECK FAILED — every Workspace call will fail until this is fixed: ${describeResult(probe)}`,
+      );
+      console.error(
+        "[upstream] a 403 here is usually one of two things, and the upstream discards which: the Drive/Docs/Sheets API is not enabled on the OAuth client's Google Cloud PROJECT, or consent did not grant that scope. Check the project first — `gcloud services list --enabled` is authoritative, a live probe is not.",
+      );
+    } else {
+      console.log("[upstream] credential verified");
+    }
   } catch (error) {
     console.error(
-      `[upstream] CREDENTIAL CHECK FAILED - Workspace calls will fail until this is fixed: ${error instanceof Error ? error.message : String(error)}`,
+      `[upstream] CREDENTIAL CHECK could not run: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 }
