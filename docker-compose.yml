@@ -45,6 +45,7 @@ services:
     # gmail.modify credential on host disk, surviving `docker compose down`.
     tmpfs:
       - /data:uid=1000,gid=1000,mode=0700,size=8m
+      - /tmp:size=16m
 
     networks:
       - shared # open-webui reaches /mcp by name
@@ -67,6 +68,8 @@ services:
       - 'no-new-privileges:true'
     cap_drop:
       - ALL
+    # Nothing writes outside /data and /tmp, both tmpfs above.
+    read_only: true
 
     healthcheck:
       test:
