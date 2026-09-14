@@ -105,6 +105,67 @@ jobs:
             ssh-keyscan -H "${VPS_HOST}" >> ~/.ssh/known_hosts
           fi
 
+      # The service reads these four at boot and exits if any is missing or
+      # malformed. Without this step that shows up as a crash-looping container
+      # 90 seconds into the deploy, and you read it out of `docker logs`. The
+      # runner already holds a vault read token, so it can just ask first.
+      - name: Verify the service's own secrets exist before touching the VPS
+        env:
+          VAULT_TOKEN: ${{ secrets.SECRETS_MANAGER_READ_TOKEN || secrets.SECRET_MANAGER_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          export VAULT_URL VAULT_FOLDER VAULT_TOKEN
+          export VAULT_ERR_PREFIX="::error::"
+          source ./vault-fetch.sh
+
+          missing=""
+          for key in GWORKSPACE_MCP_TOKEN GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_TOKEN_JSON; do
+            set +e
+            value="$(vault_fetch "$key" 2>/dev/null)"
+            rc=$?
+            set -e
+            if [ $rc -eq 2 ]; then
+              echo "::error::vault unreachable while checking ${key} — not deploying against an unknown state"
+              exit 1
+            fi
+            if [ $rc -ne 0 ] || [ -z "$value" ]; then
+              missing="${missing} ${key}"
+              continue
+            fi
+            # Shape only, never content. GOOGLE_TOKEN_JSON is the one that keeps
+            # arriving with a stray character from a terminal copy, so check the
+            # thing that actually breaks rather than merely that it is present.
+            if [ "$key" = "GOOGLE_TOKEN_JSON" ]; then
+              printf '%s' "$value" | python3 -c "
+          import json, sys
+          raw = sys.stdin.read().strip()
+          if raw.startswith('1//'):
+              sys.exit(0)
+          try:
+              parsed = json.loads(raw)
+          except Exception as error:
+              print(f'::error::GOOGLE_TOKEN_JSON is not valid JSON ({error}). '
+                    f'It is {len(raw)} characters over {len(raw.splitlines())} line(s), '
+                    f'starts with {raw[:2]!r} and ends with {raw[-2:]!r}. '
+                    f'A trailing % is zsh marking output with no newline - it is not part of the token.')
+              sys.exit(1)
+          if not parsed.get('refresh_token'):
+              print(f'::error::GOOGLE_TOKEN_JSON has no refresh_token. Keys found: '
+                    f'{\", \".join(parsed) or \"(none)\"}. client_id/client_secret there means '
+                    f'the OAuth CLIENT file was stored instead of the token.')
+              sys.exit(1)
+          " || exit 1
+            fi
+            echo "${key}: present"
+          done
+
+          if [ -n "$missing" ]; then
+            echo "::error::missing from vault folder ${VAULT_FOLDER}:${missing}"
+            echo "Add them and re-run. Nothing on the VPS was touched."
+            exit 1
+          fi
+          echo "all four service secrets are present and usable"
+
       - name: Verify the tag exists before touching the VPS
         run: |
           set -euo pipefail
@@ -173,9 +234,16 @@ jobs:
         run: |
           set -euo pipefail
           ssh -T -o StrictHostKeyChecking=yes -i ~/.ssh/id_ed25519 "root@${VPS_HOST}" bash -s <<'REMOTE_SCRIPT'
+          # Baseline the restart count. It is cumulative for the life of the
+          # container, and `up -d` leaves an unchanged container in place — so a
+          # container still crash-looping from the PREVIOUS deploy trips the
+          # detector on attempt 1 and this deploy gets blamed for it.
+          base_restarts=$(docker inspect gworkspace-mcp --format "{{.RestartCount}}" 2>/dev/null || echo 0)
           for i in $(seq 1 30); do
             status=$(docker inspect gworkspace-mcp --format "{{.State.Health.Status}}" 2>/dev/null || echo missing)
-            restarts=$(docker inspect gworkspace-mcp --format "{{.RestartCount}}" 2>/dev/null || echo 0)
+            total=$(docker inspect gworkspace-mcp --format "{{.RestartCount}}" 2>/dev/null || echo 0)
+            restarts=$(( total - base_restarts ))
+            [ "$restarts" -lt 0 ] && restarts=0
             echo "attempt $i: health=$status restarts=$restarts"
             [ "$status" = "healthy" ] && exit 0
             if [ "$status" = "missing" ]; then docker logs --tail 50 gworkspace-mcp 2>&1 || true; exit 1; fi
