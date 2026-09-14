@@ -92,3 +92,20 @@ Notes from building and reviewing this bridge. All of it was measured against
 - Send them on stdin ahead of the script, each quoted with `printf '%q'`.
   Verified with a hostile value: `ghs_tok'en;touch /tmp/PWNED` arrives byte-exact
   and creates no file.
+
+## Validate a credential by shape, and say what you saw
+
+- `GOOGLE_TOKEN_JSON` was rejected twice in a row with only the raw `JSON.parse`
+  message. That message says *where* parsing stopped and nothing about what was
+  actually stored, so each round trip cost a deploy.
+- The error now reports length, line count, and the first and last two characters
+  — enough to tell "bare token", "two objects glued" and "wrong file" apart, and
+  no part of the secret.
+- A bare `1//...` refresh token is now accepted and wrapped, with a warning. It
+  is what you get from copying the token out of `token.json` instead of copying
+  the file, it is the obvious mistake to make through a vault UI, and there is no
+  ambiguity about what was meant. Trailing garbage is still refused — that could
+  be two different credentials, and guessing which one wins is worse than failing.
+- Distinguish "parsed but has no refresh_token" from "did not parse", and list
+  the keys that *were* found: `client_id`/`client_secret` means the OAuth client
+  file was stored instead of the token, which is a different fix.

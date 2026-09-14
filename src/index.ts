@@ -77,6 +77,50 @@ function drainStderr(raw: unknown): void {
 }
 
 /**
+ * Turns whatever is in the vault into the document the upstream expects.
+ *
+ * Validated here rather than left to the child, because the child swallows every
+ * error from loading this file and falls back to the INTERACTIVE browser consent
+ * flow: it prints a URL, waits forever, never answers initialize, and the only
+ * symptom is this process timing out after 60s and crash-looping with nothing
+ * that says why.
+ *
+ * A bare refresh token is accepted and wrapped. `1//...` is what you get from
+ * copying the token out of token.json rather than copying the file, it is an
+ * easy mistake to make through a vault UI, and there is no ambiguity about what
+ * was meant.
+ */
+function normaliseToken(raw: string): string {
+  const value = raw.trim();
+
+  if (/^1\/\/[\w.-]+$/.test(value)) {
+    console.warn(
+      "[auth] GOOGLE_TOKEN_JSON held a bare refresh token, not a token.json document — wrapping it. Store the whole file to silence this.",
+    );
+    return `${JSON.stringify({ refresh_token: value })}\n`;
+  }
+
+  let parsed: { refresh_token?: unknown };
+  try {
+    parsed = JSON.parse(value) as { refresh_token?: unknown };
+  } catch (error) {
+    // Describe the SHAPE, never the content: this value is a credential.
+    const why = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `FATAL: GOOGLE_TOKEN_JSON is not valid JSON (${why}). It is ${value.length} characters over ${value.split("\n").length} line(s), starts with ${JSON.stringify(value.slice(0, 2))} and ends with ${JSON.stringify(value.slice(-2))}. Expected either the whole token.json, or the bare refresh token starting "1//".`,
+    );
+  }
+
+  if (typeof parsed.refresh_token !== "string" || !parsed.refresh_token) {
+    throw new Error(
+      `FATAL: GOOGLE_TOKEN_JSON parsed as JSON but has no refresh_token. Its keys are: ${Object.keys(parsed).join(", ") || "(none)"}. If those look like client_id/client_secret you have stored the OAuth CLIENT file; the token comes from completing consent.`,
+    );
+  }
+
+  return value;
+}
+
+/**
  * Start the stdio child once and keep it. Google's OAuth refresh happens inside
  * that process, so restarting it per request would re-do the token dance every
  * time and lose its cache.
@@ -95,18 +139,10 @@ async function connectUpstream(credentials: {
   // OAuth flow: the child prints a consent URL, waits, never answers
   // initialize, and never rejects — so the only symptom is this process timing
   // out after 60s and crash-looping with nothing that says why.
-  try {
-    const parsed = JSON.parse(credentials.tokenJson) as { refresh_token?: string };
-    if (!parsed.refresh_token) throw new Error("no refresh_token field");
-  } catch (error) {
-    const why = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      `FATAL: GOOGLE_TOKEN_JSON from the vault is not a usable OAuth token (${why}). Re-run consent and store the whole token.json.`,
-    );
-  }
+  const tokenJson = normaliseToken(credentials.tokenJson);
 
   await fs.mkdir(config.tokenDir, { recursive: true, mode: 0o700 });
-  await fs.writeFile(tokenPath, credentials.tokenJson, { mode: 0o600 });
+  await fs.writeFile(tokenPath, tokenJson, { mode: 0o600 });
   // writeFile's mode is ignored when the file already exists.
   await fs.chmod(tokenPath, 0o600);
 
