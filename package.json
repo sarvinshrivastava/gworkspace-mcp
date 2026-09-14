@@ -1,0 +1,25 @@
+{
+  "name": "gworkspace-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Bridges the stdio Google Workspace MCP server onto Streamable HTTP for Open WebUI",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/node": "2.0.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "express": "^5.1.0",
+    "@a-bonus/google-docs-mcp": "1.11.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,188 @@
+name: Deploy to VPS
+
+# workflow_dispatch ONLY, by a human. Same shape as openwebui-vsp and gworkspace-mcp: the VPS is
+# never touched outside this workflow.
+#
+# SECRETS_MANAGER_READ_TOKEN is the only repo secret; VPS_HOST, VPS_SSH_KEY and
+# VPS_HOST_KEY come from the vault at run time.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to deploy (latest, or sha-<short> to pin/roll back)'
+        required: true
+        default: 'latest'
+
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  REMOTE_DIR: /opt/gworkspace-mcp
+  VAULT_URL: https://secrets.vps.sarvinshrivastava.space
+  VAULT_FOLDER: Root
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # The tag reaches a root shell on the VPS, and GitHub substitutes it into
+      # the script text before bash parses it — so constrain its shape first.
+      - name: Validate image tag
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_TAG" =~ ^(latest|sha-[0-9a-f]{7,40})$ ]] \
+            || { echo "::error::image_tag must be 'latest' or 'sha-<short>', got '$IMAGE_TAG'"; exit 1; }
+
+      - name: Fetch VPS credentials from the vault
+        env:
+          # Accepts either spelling: this repo's secret is SECRET_MANAGER_READ_TOKEN
+          # while openwebui-vsp uses SECRETS_MANAGER_READ_TOKEN. Worth normalising
+          # to one name eventually; until then a mismatch fails the deploy at its
+          # first step with a message that does not mention naming.
+          VAULT_TOKEN: ${{ secrets.SECRETS_MANAGER_READ_TOKEN || secrets.SECRET_MANAGER_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "${VAULT_TOKEN}" ] || { echo "::error::neither SECRETS_MANAGER_READ_TOKEN nor SECRET_MANAGER_READ_TOKEN is set"; exit 1; }
+
+          # The same vault-read used across these services, kept byte-identical with
+          # openwebui-vsp. It handles the two failure modes that bit us there:
+          # a retried response body gluing itself in front of the good one, and
+          # an empty value passing every guard.
+          export VAULT_URL="${{ env.VAULT_URL }}"
+          export VAULT_FOLDER="${{ env.VAULT_FOLDER }}"
+          export VAULT_TOKEN
+          export VAULT_ERR_PREFIX="::error::"
+          source ./vault-fetch.sh
+
+          VPS_HOST="$(vault_fetch VPS_HOST)"
+          echo "::add-mask::${VPS_HOST}"
+          echo "VPS_HOST=${VPS_HOST}" >> "$GITHUB_ENV"
+
+          # ::add-mask:: is line-oriented: masking a multi-line PEM in one call
+          # leaks every line after the first into the job log.
+          VPS_SSH_KEY="$(vault_fetch VPS_SSH_KEY)"
+          while IFS= read -r line; do [ -n "$line" ] && echo "::add-mask::$line"; done <<< "$VPS_SSH_KEY"
+
+          install -m 700 -d ~/.ssh
+          ( umask 077; printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519 )
+
+          # vault_fetch returns 1 for a definite refusal (key absent) and 2 for a
+          # transient failure. Collapsing them would mean a vault blip silently
+          # downgrades host verification to trust-on-first-use — and the script
+          # then hands both bearer tokens to whatever answers on port 22.
+          set +e
+          VPS_HOST_KEY="$(vault_fetch VPS_HOST_KEY)"
+          host_key_rc=$?
+          set -e
+
+          if [ $host_key_rc -eq 0 ]; then
+            printf '%s\n' "$VPS_HOST_KEY" > ~/.ssh/known_hosts
+            echo "host key pinned from vault"
+          elif [ $host_key_rc -eq 2 ]; then
+            echo "::error::vault was unreachable while fetching VPS_HOST_KEY — refusing to fall back to trust-on-first-use"
+            exit 1
+          else
+            echo "::warning::VPS_HOST_KEY not in vault — falling back to trust-on-first-use. Add it to close this."
+            ssh-keyscan -H "${VPS_HOST}" >> ~/.ssh/known_hosts
+          fi
+
+      - name: Verify the tag exists before touching the VPS
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login "${{ env.REGISTRY }}" -u "${{ github.actor }}" --password-stdin
+          docker manifest inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}" > /dev/null
+
+      - name: Ship compose file
+        run: |
+          set -euo pipefail
+          ssh -T -o StrictHostKeyChecking=yes -i ~/.ssh/id_ed25519 "root@${VPS_HOST}" "mkdir -p ${{ env.REMOTE_DIR }}"
+          scp -o StrictHostKeyChecking=yes -i ~/.ssh/id_ed25519 docker-compose.yml \
+            "root@${VPS_HOST}:${{ env.REMOTE_DIR }}/docker-compose.yml"
+
+      - name: Pull and restart
+        env:
+          # Passed through the environment rather than interpolated into the
+          # script text. GitHub substitutes ${{ }} before bash parses the heredoc,
+          # so a secret containing a quote or $( ) would otherwise execute as root
+          # on the VPS — the same reasoning the tag validation step applies to
+          # image_tag, which was not carried over to the secrets until now.
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SM_TOKEN: ${{ secrets.SECRETS_MANAGER_READ_TOKEN || secrets.SECRET_MANAGER_READ_TOKEN }}
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}
+          REGISTRY: ${{ env.REGISTRY }}
+          ACTOR: ${{ github.actor }}
+          REMOTE_DIR: ${{ env.REMOTE_DIR }}
+        run: |
+          set -euo pipefail
+          ssh -T -o StrictHostKeyChecking=yes -i ~/.ssh/id_ed25519 "root@${VPS_HOST}" \
+            GHCR_TOKEN="$GHCR_TOKEN" SM_TOKEN="$SM_TOKEN" IMAGE_REF="$IMAGE_REF" \
+            REGISTRY="$REGISTRY" ACTOR="$ACTOR" REMOTE_DIR="$REMOTE_DIR" \
+            bash -s <<'REMOTE_SCRIPT'
+          set -euo pipefail
+          cd "$REMOTE_DIR"
+
+          echo "$GHCR_TOKEN" | docker login "$REGISTRY" -u "$ACTOR" --password-stdin
+
+          # `shared` already exists on this box but has never had a member. Create
+          # it if a future rebuild has not.
+          docker network inspect shared >/dev/null 2>&1 || docker network create shared
+
+          touch .env
+          sed -i '/^GWORKSPACE_IMAGE=/d' .env
+          echo "GWORKSPACE_IMAGE=$IMAGE_REF" >> .env
+
+          export SECRETS_MANAGER_TOKEN="$SM_TOKEN"
+          docker compose -f docker-compose.yml pull
+          # --remove-orphans is load-bearing: the proxy service was renamed when it
+          # was split in two, and without this the old single-proxy container keeps
+          # running, still holding /var/run/docker.sock with the permissive config
+          # this split exists to remove.
+          docker compose -f docker-compose.yml up -d --remove-orphans
+          unset SECRETS_MANAGER_TOKEN
+          docker logout "$REGISTRY" || true
+          REMOTE_SCRIPT
+
+      - name: Wait for health
+        run: |
+          set -euo pipefail
+          ssh -T -o StrictHostKeyChecking=yes -i ~/.ssh/id_ed25519 "root@${VPS_HOST}" bash -s <<'REMOTE_SCRIPT'
+          for i in $(seq 1 30); do
+            status=$(docker inspect gworkspace-mcp --format "{{.State.Health.Status}}" 2>/dev/null || echo missing)
+            restarts=$(docker inspect gworkspace-mcp --format "{{.RestartCount}}" 2>/dev/null || echo 0)
+            echo "attempt $i: health=$status restarts=$restarts"
+            [ "$status" = "healthy" ] && exit 0
+            if [ "$status" = "missing" ]; then docker logs --tail 50 gworkspace-mcp 2>&1 || true; exit 1; fi
+            if [ "$restarts" -gt 2 ]; then echo "crash-looping"; docker logs --tail 100 gworkspace-mcp 2>&1 || true; exit 1; fi
+            sleep 10
+          done
+          echo "never became healthy"; docker logs --tail 100 gworkspace-mcp 2>&1 || true; exit 1
+          REMOTE_SCRIPT
+
+      - name: Report
+        if: always()
+        run: |
+          {
+            echo "### Deploy ${{ job.status }}"
+            echo ""
+            echo "Tag: \`${{ inputs.image_tag }}\`"
+            echo ""
+            echo "Wire it in Open WebUI: Admin → Settings → Integrations → MCP → \`http://gworkspace-mcp:3012/mcp\`, auth Bearer."
+          } >> "$GITHUB_STEP_SUMMARY"

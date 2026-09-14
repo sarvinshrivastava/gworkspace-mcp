@@ -1,0 +1,78 @@
+# gworkspace-mcp - Google Docs, Sheets, Drive and Calendar in chat.
+#
+# The upstream server speaks stdio; Open WebUI speaks Streamable HTTP only. This
+# runs the former as a child and relays between them.
+#
+#   SECRETS_MANAGER_TOKEN=<token> docker compose up -d
+
+name: gworkspace-mcp
+
+services:
+  gworkspace-mcp:
+    image: ${GWORKSPACE_IMAGE:-ghcr.io/sarvinshrivastava/gworkspace-mcp:latest}
+    container_name: gworkspace-mcp
+    restart: unless-stopped
+
+    # Not published to the host at all: unlike pages, nothing here is public.
+    expose:
+      - '3014'
+
+    environment:
+      PORT: '3014'
+      CONFIG_HOME: '/data/config'
+      TOKEN_DIR: '/data/config/google-docs-mcp'
+      NODE_OPTIONS: '--max-old-space-size=192'
+
+      SECRETS_MANAGER_URL: '${SECRETS_MANAGER_URL:-http://secret-manager:8000}'
+      SECRETS_MANAGER_FOLDER: '${SECRETS_MANAGER_FOLDER:-Root}'
+      SECRETS_MANAGER_TOKEN: '${SECRETS_MANAGER_TOKEN:?set SECRETS_MANAGER_TOKEN in the shell, or deploy via the workflow}'
+
+      # The upstream exposes 118 tools. Open WebUI re-lists tools on EVERY chat
+      # turn, so shipping all of them puts a large schema payload in front of the
+      # model every message. Narrow it to what is actually used; empty means all.
+      TOOL_ALLOWLIST: '${TOOL_ALLOWLIST:-readDocument,appendText,insertText,findAndReplace,createDocument,listDocuments,searchDocuments,appendMarkdown,readSpreadsheet,writeSpreadsheet,appendRows,createSpreadsheet,listSpreadsheets,searchDriveFiles,listDriveFiles,createFolder,listEvents,createEvent,updateEvent,quickAddEvent}'
+
+    volumes:
+      # The refreshed OAuth token. Losing this means re-running consent by hand.
+      - gworkspace-config:/data
+
+    networks:
+      - shared # open-webui reaches /mcp by name
+      - vault # secret-manager, for credentials at boot
+
+    mem_limit: 320m
+    memswap_limit: 320m
+    cpus: 0.25
+    pids_limit: 256
+
+    labels:
+      autoheal: 'true'
+    security_opt:
+      - 'no-new-privileges:true'
+    cap_drop:
+      - ALL
+
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -sf http://localhost:3014/healthz || exit 1']
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      # Longer: boot fetches four secrets and starts a child process that does
+      # its own OAuth refresh before it answers.
+      start_period: 90s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
+volumes:
+  gworkspace-config:
+
+networks:
+  shared:
+    external: true
+  vault:
+    external: true
+    name: secrets-manager_default
