@@ -73,53 +73,120 @@ jobs:
       - name: Smoke test — the server boots and serves health
         run: |
           set -euo pipefail
-          # A stub vault. Note this service ALSO starts a Google MCP child that
-          # will fail to authenticate against stub credentials, so the smoke test
-          # asserts the image boots and the auth gate works — not that Workspace
-          # is reachable, which needs real credentials and belongs post-deploy.
+          # A stub vault, answering per key. GOOGLE_TOKEN_JSON has to be a real
+          # OAuth document: the relay now refuses to hand the child anything
+          # without a refresh_token, because the upstream silently falls back to
+          # the INTERACTIVE consent flow on a bad one and then hangs forever.
+          # Nothing here reaches Google — the upstream's authorize() makes no
+          # network call, so the child boots and lists its tools on fake
+          # credentials, and only a real tool CALL would need real ones.
           python3 -c "
-          import json, threading
+          import json
           from http.server import BaseHTTPRequestHandler, HTTPServer
+          VALUES = {
+              'GWORKSPACE_MCP_TOKEN': 'ci-smoke',
+              'GOOGLE_CLIENT_ID': 'ci-client-id.apps.googleusercontent.com',
+              'GOOGLE_CLIENT_SECRET': 'ci-client-secret',
+              'GOOGLE_TOKEN_JSON': json.dumps({
+                  'type': 'authorized_user',
+                  'client_id': 'ci-client-id.apps.googleusercontent.com',
+                  'client_secret': 'ci-client-secret',
+                  'refresh_token': 'ci-refresh-token',
+              }),
+          }
           class H(BaseHTTPRequestHandler):
               def log_message(self,*a): pass
               def do_GET(self):
-                  b=json.dumps({'key':'GWORKSPACE_MCP_TOKEN','value':'ci-smoke','folder':'Root'}).encode()
+                  key = self.path.rsplit('/', 1)[-1]
+                  if key not in VALUES:
+                      self.send_response(404); self.end_headers(); return
+                  b=json.dumps({'key':key,'value':VALUES[key],'folder':'Root'}).encode()
                   self.send_response(200); self.send_header('Content-Type','application/json')
                   self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b)
           HTTPServer(('0.0.0.0',8890),H).serve_forever()
           " &
           sleep 1
 
+          # The production sandbox, not a bare `docker run`: read-only rootfs,
+          # a tmpfs for the token store, dropped capabilities and the real memory
+          # ceiling. Without these flags a regression in any of them ships green
+          # and only fails on the VPS.
+          #
+          # appendTableRows is in the allowlist on purpose: the upstream's source
+          # registers it twice (docs and sheets) and registerTool throws on a
+          # duplicate name. FastMCP collapses the collision before tools/list, so
+          # it does not reach us today — this pins that, because if a future
+          # release stops collapsing it, createServer throws per request and every
+          # POST /mcp returns 500 while /healthz stays green.
           docker run -d --name smoke --network host \
+            --read-only --tmpfs /tmp \
+            --tmpfs /data:uid=1000,gid=1000,mode=0700,size=8m \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            --memory 512m --memory-swap 640m \
             -e SECRETS_MANAGER_URL=http://127.0.0.1:8890 \
             -e SECRETS_MANAGER_TOKEN=ci \
             -e PORT=3014 \
+            -e TOOL_ALLOWLIST=readDocument,appendText,appendTableRows \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
 
-          for i in $(seq 1 20); do
+          for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:3014/healthz > /dev/null; then echo "health ok"; break; fi
-            if [ "$i" = "20" ]; then echo "never came up"; docker logs smoke; exit 1; fi
+            if [ "$i" = "30" ]; then echo "never came up"; docker logs smoke; exit 1; fi
             sleep 2
           done
 
           # An unauthenticated call must be refused.
           code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:3014/mcp \
             -H 'Content-Type: application/json' -d '{}')
-          [ "$code" = "401" ] || { echo "expected 401 without a bearer, got $code"; exit 1; }
+          [ "$code" = "401" ] || { echo "expected 401 without a bearer, got $code"; docker logs smoke; exit 1; }
           echo "auth gate ok"
 
-          # And the tool list must actually be there.
-          # tools/list is skipped here: the upstream child cannot connect with
-          # stub credentials, so there are legitimately zero tools to list.
+          # Exactly three names in, exactly three tools out: proves the duplicate
+          # registration is deduplicated rather than throwing, and that the
+          # allowlist is applied.
           tools=$(curl -s -X POST http://127.0.0.1:3014/mcp \
             -H 'Content-Type: application/json' \
             -H 'Accept: application/json, text/event-stream' \
             -H 'Authorization: Bearer ci-smoke' \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
             | sed -n 's/^data: //p' | python3 -c "import sys,json; print(len(json.load(sys.stdin)['result']['tools']))")
-          echo "tools/list returned $tools tools (0 is expected against a stub vault)"
+          [ "$tools" = "3" ] || { echo "expected 3 tools, got $tools"; docker logs smoke; exit 1; }
+          echo "tool registration ok"
 
+          # An empty allowlist must expose NOTHING. The unfiltered upstream
+          # surface includes sendEmail, deleteFile and setFilePermission.
           docker rm -f smoke > /dev/null
+          docker run -d --name smoke-deny --network host \
+            --read-only --tmpfs /tmp \
+            --tmpfs /data:uid=1000,gid=1000,mode=0700,size=8m \
+            -e SECRETS_MANAGER_URL=http://127.0.0.1:8890 \
+            -e SECRETS_MANAGER_TOKEN=ci -e PORT=3014 \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:3014/healthz > /dev/null; then break; fi
+            if [ "$i" = "30" ]; then echo "deny-all case never came up"; docker logs smoke-deny; exit 1; fi
+            sleep 2
+          done
+          curl -s -X POST http://127.0.0.1:3014/mcp \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            -H 'Authorization: Bearer ci-smoke' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+            | sed -n 's/^data: //p' > /tmp/deny.json
+          # Two acceptable answers, and both mean zero tools. With nothing
+          # registered McpServer never declares the tools capability, so
+          # tools/list is legitimately "Method not found" (-32601) rather than an
+          # empty list. Anything else means something got exposed.
+          python3 -c "
+          import json
+          r = json.load(open('/tmp/deny.json'))
+          if 'error' in r:
+              assert r['error']['code'] == -32601, r
+          else:
+              assert r['result']['tools'] == [], r
+          print('deny-by-default ok')
+          "
+          docker rm -f smoke-deny > /dev/null
 
       - name: Report
         run: |

@@ -2,3 +2,10 @@ node_modules/
 dist/
 .env
 .env.*
+__*.mjs
+
+# The image is built with `npm ci`, so package-lock.json is the shipped
+# lockfile. Two tracked lockfiles for one tree drift, and only one of them
+# carries the integrity hashes that make the build verifiable.
+bun.lock
+bun.lockb

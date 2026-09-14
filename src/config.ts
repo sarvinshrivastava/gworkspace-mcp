@@ -17,21 +17,30 @@ const env = (key: string, fallback?: string): string => {
 export const config = {
   port: Number(env("PORT", "3014")),
 
-  /** Home for the upstream server's OAuth token store. A volume, so the
-   *  refreshed token survives a deploy rather than forcing a re-consent. */
   /** The pinned upstream server's entry point, inside this image. */
   upstreamEntry: env(
     "UPSTREAM_ENTRY",
     "/app/node_modules/@a-bonus/google-docs-mcp/dist/index.js",
   ),
 
+  /**
+   * Where the child keeps its OAuth token store. A tmpfs, NOT a volume: the
+   * vault is rewritten over this path on every boot and the upstream only ever
+   * persists a token in its interactive consent path, so a volume held a second
+   * permanent plaintext copy of the refresh token on host disk and bought
+   * nothing.
+   */
   configHome: env("CONFIG_HOME", "/data/config"),
   tokenDir: env("TOKEN_DIR", "/data/config/google-docs-mcp"),
 
+  /** The child's own V8 heap budget. Two processes share one cgroup. */
+  childHeapMb: Number(env("CHILD_HEAP_MB", "192")),
+
   /**
-   * Optional: expose only these upstream tools. The upstream ships 118, which is
-   * a lot of schema for every chat turn to carry — Open WebUI re-lists tools per
-   * message. Empty means expose everything.
+   * Expose only these upstream tools. The upstream ships ~120 registrations and
+   * that is a lot of schema for every chat turn to carry — Open WebUI re-lists
+   * tools per message, and the full set measured 126 KB, ~31k tokens, resent on
+   * every LLM call of every turn. Empty exposes NOTHING; see selectTools.
    */
   toolAllowlist: (process.env.TOOL_ALLOWLIST ?? "")
     .split(",")
@@ -45,51 +54,32 @@ export const config = {
   },
 
   limits: {
-    // A page is a document, not a bundle. Large enough for a real report with
-    // inline CSS, small enough that the model cannot fill the disk or the
-    // context window with one call.
+    // Per vault request, not per boot: four keys are fetched concurrently.
     httpTimeoutMs: 15_000,
   },
 };
 
-/** See bridge-mcp's config.ts — same reasoning, same two failure modes handled. */
+/** Extracts the value from a vault response. */
 export function parseVaultBody(text: string, label: string): string {
-  const docs: Array<{ value?: unknown }> = [];
-  let depth = 0;
-  let startIdx = -1;
-  let inString = false;
-  let escaped = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === "\\") escaped = true;
-      else if (ch === '"') inString = false;
-      continue;
-    }
-    if (ch === '"') inString = true;
-    else if (ch === "{") {
-      if (depth === 0) startIdx = i;
-      depth++;
-    } else if (ch === "}") {
-      if (depth > 0) depth--;
-      if (depth === 0 && startIdx >= 0) {
-        try {
-          docs.push(JSON.parse(text.slice(startIdx, i + 1)));
-        } catch {
-          /* not valid JSON on its own */
-        }
-        startIdx = -1;
-      }
-    }
+  // Deliberately a plain parse. The bash sibling slurps concatenated documents
+  // because curl cannot rewind a pipe on --retry and glues a failed body in
+  // front of the good one. `fetch` has no such failure mode: every attempt is a
+  // fresh response and text() reads exactly one body. The hand-rolled scanner
+  // that used to live here also swallowed malformed JSON, which is worse than
+  // failing on it.
+  let parsed: { value?: unknown };
+  try {
+    parsed = JSON.parse(text) as { value?: unknown };
+  } catch {
+    throw new Error(`FATAL: vault returned unparseable JSON for ${label}`);
   }
 
-  const value = docs.at(-1)?.value;
-  if (typeof value !== "string" || value === "") {
+  // An empty string is a failure, not a value: it would configure this service
+  // with blank credentials that only fail later, at call time.
+  if (typeof parsed.value !== "string" || parsed.value === "") {
     throw new Error(`FATAL: vault returned no usable value for ${label}`);
   }
-  return value;
+  return parsed.value;
 }
 
 export async function vaultFetch(key: string): Promise<string> {

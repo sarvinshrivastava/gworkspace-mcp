@@ -1,6 +1,6 @@
 name: Deploy to VPS
 
-# workflow_dispatch ONLY, by a human. Same shape as openwebui-vsp and gworkspace-mcp: the VPS is
+# workflow_dispatch ONLY, by a human. Same shape as openwebui-vsp and pages-mcp: the VPS is
 # never touched outside this workflow.
 #
 # SECRETS_MANAGER_READ_TOKEN is the only repo secret; VPS_HOST, VPS_SSH_KEY and
@@ -53,8 +53,9 @@ jobs:
 
       - name: Fetch VPS credentials from the vault
         env:
-          # Accepts either spelling: this repo's secret is SECRET_MANAGER_READ_TOKEN
-          # while openwebui-vsp uses SECRETS_MANAGER_READ_TOKEN. Worth normalising
+          # Accepts either spelling, because the repos on this account are not
+          # consistent yet and a deploy that fails on a name is a bad first
+          # experience. The error below names both. Worth normalising
           # to one name eventually; until then a mismatch fails the deploy at its
           # first step with a message that does not mention naming.
           VAULT_TOKEN: ${{ secrets.SECRETS_MANAGER_READ_TOKEN || secrets.SECRET_MANAGER_READ_TOKEN }}
@@ -119,11 +120,14 @@ jobs:
 
       - name: Pull and restart
         env:
-          # Passed through the environment rather than interpolated into the
-          # script text. GitHub substitutes ${{ }} before bash parses the heredoc,
-          # so a secret containing a quote or $( ) would otherwise execute as root
-          # on the VPS — the same reasoning the tag validation step applies to
-          # image_tag, which was not carried over to the secrets until now.
+          # Sent on STDIN, ahead of the script, each value quoted with printf %q.
+          #
+          # The obvious form — `ssh host A="$A" bash -s` — does NOT keep them out
+          # of the shell: ssh joins every argument into one string that the REMOTE
+          # login shell parses, so a secret containing a quote or $( ) executes as
+          # root, which is exactly the class the image_tag validation above exists
+          # to prevent. It also puts the values in the remote argv, where ps can
+          # read them for the life of the deploy.
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SM_TOKEN: ${{ secrets.SECRETS_MANAGER_READ_TOKEN || secrets.SECRET_MANAGER_READ_TOKEN }}
           IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}
@@ -132,18 +136,26 @@ jobs:
           REMOTE_DIR: ${{ env.REMOTE_DIR }}
         run: |
           set -euo pipefail
-          ssh -T -o StrictHostKeyChecking=yes -i ~/.ssh/id_ed25519 "root@${VPS_HOST}" \
-            GHCR_TOKEN="$GHCR_TOKEN" SM_TOKEN="$SM_TOKEN" IMAGE_REF="$IMAGE_REF" \
-            REGISTRY="$REGISTRY" ACTOR="$ACTOR" REMOTE_DIR="$REMOTE_DIR" \
-            bash -s <<'REMOTE_SCRIPT'
+          {
+            printf 'GHCR_TOKEN=%q\n' "$GHCR_TOKEN"
+            printf 'SM_TOKEN=%q\n'   "$SM_TOKEN"
+            printf 'IMAGE_REF=%q\n'  "$IMAGE_REF"
+            printf 'REGISTRY=%q\n'   "$REGISTRY"
+            printf 'ACTOR=%q\n'      "$ACTOR"
+            printf 'REMOTE_DIR=%q\n' "$REMOTE_DIR"
+            cat <<'REMOTE_SCRIPT'
           set -euo pipefail
           cd "$REMOTE_DIR"
 
           echo "$GHCR_TOKEN" | docker login "$REGISTRY" -u "$ACTOR" --password-stdin
 
-          # `shared` already exists on this box but has never had a member. Create
-          # it if a future rebuild has not.
+          # Both networks are `external: true` in the compose file. `shared` is
+          # ours to create; `secrets-manager_default` belongs to the vault project,
+          # and if it is absent the vault is down — fail here rather than half way
+          # through `up`, after the compose file has already been replaced.
           docker network inspect shared >/dev/null 2>&1 || docker network create shared
+          docker network inspect secrets-manager_default >/dev/null 2>&1 \
+            || { echo "secrets-manager_default is missing — is the vault up?"; exit 1; }
 
           touch .env
           sed -i '/^GWORKSPACE_IMAGE=/d' .env
@@ -151,14 +163,11 @@ jobs:
 
           export SECRETS_MANAGER_TOKEN="$SM_TOKEN"
           docker compose -f docker-compose.yml pull
-          # --remove-orphans is load-bearing: the proxy service was renamed when it
-          # was split in two, and without this the old single-proxy container keeps
-          # running, still holding /var/run/docker.sock with the permissive config
-          # this split exists to remove.
           docker compose -f docker-compose.yml up -d --remove-orphans
           unset SECRETS_MANAGER_TOKEN
           docker logout "$REGISTRY" || true
           REMOTE_SCRIPT
+          } | ssh -T -o StrictHostKeyChecking=yes -i ~/.ssh/id_ed25519 "root@${VPS_HOST}" bash -s
 
       - name: Wait for health
         run: |
@@ -184,5 +193,5 @@ jobs:
             echo ""
             echo "Tag: \`${{ inputs.image_tag }}\`"
             echo ""
-            echo "Wire it in Open WebUI: Admin → Settings → Integrations → MCP → \`http://gworkspace-mcp:3012/mcp\`, auth Bearer."
+            echo "Wire it in Open WebUI: Admin → Settings → Integrations → MCP → \`http://gworkspace-mcp:3014/mcp\`, auth Bearer."
           } >> "$GITHUB_STEP_SUMMARY"
