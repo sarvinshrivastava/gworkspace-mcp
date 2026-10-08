@@ -23,8 +23,8 @@ holding Google credentials. It is pinned at `1.11.3` and installed at build time
 
 The upstream exposes **~120 tools**, and Open WebUI re-lists tools on *every chat
 turn* — so exposing all of them puts a large schema payload in front of the model
-on every message. `TOOL_ALLOWLIST` narrows it to the ones actually used; empty
-means all of them.
+on every message. `TOOL_ALLOWLIST` narrows it to the ones actually used; an
+empty allowlist exposes nothing, by design.
 
 ## Secrets
 
