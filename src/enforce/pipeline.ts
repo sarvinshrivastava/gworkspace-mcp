@@ -10,6 +10,7 @@
 import { FOLDER_MIME, type DriveClient } from "../drive/client.js";
 import { CALENDAR_TOOLS } from "../policy/derive.js";
 import type { AgentContext } from "../policy/auth.js";
+import { MAX_RESOURCES } from "../policy/store.js";
 import { ALL_AGENT_GUARDS, ID_RE } from "./guards.js";
 import type { DenyReason, ScopeResolver, Verdict } from "./resolver.js";
 import { scopedSearchDriveFiles, type SubtreeCache } from "./search.js";
@@ -58,8 +59,6 @@ export const CREATE_TOOLS: ReadonlySet<string> = new Set([
   "createSpreadsheet",
   "createFolder",
 ]);
-
-const MAX_RESOURCES = 50;
 
 export function denyMessage(reason: DenyReason, id?: string): string {
   switch (reason) {
@@ -153,6 +152,18 @@ export async function planCall(
     return primary;
   };
 
+  /**
+   * The folder in `key` when the agent gave one, else the primary — and filling
+   * in the primary rewrites the call. `in`, not a value check: "" is "given",
+   * and the upstream treats it as Drive root.
+   */
+  const folderOrPrimary = async (key: string, live: boolean): Promise<Plan | string> => {
+    if (key in args) return checkFolder(args[key], live);
+    const fallback = await checkPrimary(live);
+    if (typeof fallback === "string") mutated = true;
+    return fallback;
+  };
+
   // 6. Reads and writes of one file.
   const idArg = ID_ARG[tool];
   if (idArg) {
@@ -177,14 +188,7 @@ export async function planCall(
     if (tool === "createSpreadsheet" && args.initialData !== undefined) {
       return deny("initial_data", []);
     }
-    let parent: Plan | string;
-    if ("parentFolderId" in args) {
-      // "" is "given": the upstream treats it as Drive root.
-      parent = await checkFolder(args.parentFolderId, true);
-    } else {
-      parent = await checkPrimary(true);
-      if (typeof parent === "string") mutated = true;
-    }
+    const parent = await folderOrPrimary("parentFolderId", true);
     if (typeof parent !== "string") return parent;
     return {
       kind: "relay",
@@ -198,13 +202,7 @@ export async function planCall(
 
   // 8. Direct children of one folder.
   if (tool === "listDriveFiles") {
-    let folder: Plan | string;
-    if ("folderId" in args) {
-      folder = await checkFolder(args.folderId, false);
-    } else {
-      folder = await checkPrimary(false);
-      if (typeof folder === "string") mutated = true;
-    }
+    const folder = await folderOrPrimary("folderId", false);
     if (typeof folder !== "string") return folder;
     return { kind: "relay", args: { ...args, folderId: folder }, mutated, resources: [folder] };
   }

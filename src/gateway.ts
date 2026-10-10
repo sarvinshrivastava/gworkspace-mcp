@@ -14,6 +14,7 @@ import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
 import type { Audit } from "./audit.js";
 import { denyMessage, planCall, type PipelineDeps } from "./enforce/pipeline.js";
 import { ScopeTooLarge } from "./enforce/search.js";
+import { errorMessage } from "./errors.js";
 import type { AgentContext, Authenticator } from "./policy/auth.js";
 import { enabledTools } from "./policy/derive.js";
 import { describeResult, type UpstreamState } from "./upstream.js";
@@ -111,7 +112,7 @@ export function createServer(ctx: AgentContext, deps: GatewayDeps): McpServer {
           }
           return result as CallToolResult;
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
+          const message = errorMessage(error);
           audit?.tool(ctx, tool.name, "error", "exception", resources);
           return fail(message);
         }
@@ -192,7 +193,7 @@ export function createMcpApp(deps: GatewayDeps): express.Express {
       // Degrade one request rather than every request. Registration is validated
       // at boot, so reaching here means a schema the SDK's Ajv would not compile.
       console.error(
-        `[mcp] could not build the tool server: ${error instanceof Error ? error.message : String(error)}`,
+        `[mcp] could not build the tool server: ${errorMessage(error)}`,
       );
       res.status(503).json({ error: "tools unavailable" });
       return;

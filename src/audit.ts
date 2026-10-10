@@ -7,9 +7,10 @@
  * A write that fails is logged and counted, and /healthz reports the count.
  */
 
+import { errorMessage } from "./errors.js";
 import type { AuditRow, PolicyStore } from "./policy/store.js";
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+export const DAY_MS = 24 * 60 * 60 * 1000;
 const AUTH_DEDUPE_MS = 60_000;
 
 export class Audit {
@@ -27,7 +28,7 @@ export class Audit {
     } catch (error) {
       this.errors++;
       console.error(
-        `[audit] could not write a row (${this.errors} so far): ${error instanceof Error ? error.message : String(error)}`,
+        `[audit] could not write a row (${this.errors} so far): ${errorMessage(error)}`,
       );
     }
   }
@@ -72,7 +73,7 @@ export class Audit {
     } catch (error) {
       this.errors++;
       console.error(
-        `[audit] prune failed: ${error instanceof Error ? error.message : String(error)}`,
+        `[audit] prune failed: ${errorMessage(error)}`,
       );
     }
   }

@@ -19,11 +19,12 @@
 
 import { createAdminApp } from "./admin/app.js";
 import { makeAllowedSources } from "./admin/security.js";
-import { Audit } from "./audit.js";
+import { Audit, DAY_MS } from "./audit.js";
 import { config, vaultFetch, vaultFetchOptional } from "./config.js";
 import { DriveClient } from "./drive/client.js";
 import { ScopeResolver } from "./enforce/resolver.js";
 import { SubtreeCache } from "./enforce/search.js";
+import { errorMessage } from "./errors.js";
 import { createMcpApp } from "./gateway.js";
 import {
   makeAuthenticator,
@@ -39,8 +40,6 @@ import {
   refreshTokenOf,
   upstreamState,
 } from "./upstream.js";
-
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 let store: PolicyStore | null = null;
 let dbError: string | null = null;
@@ -72,7 +71,7 @@ function openStore(): void {
       return;
     }
     console.error(
-      `FATAL: policy DB exists but cannot be opened at ${config.dbPath}: ${error instanceof Error ? error.message : String(error)}. Refusing to start without the restrictions it holds. Restore it from ${config.backupDir} (see docker-compose.yml) or fix its permissions.`,
+      `FATAL: policy DB exists but cannot be opened at ${config.dbPath}: ${errorMessage(error)}. Refusing to start without the restrictions it holds. Restore it from ${config.backupDir} (see docker-compose.yml) or fix its permissions.`,
     );
     process.exit(1);
   }
@@ -86,7 +85,7 @@ function openStore(): void {
     audit?.prune();
     if (store) {
       backupDaily(store, config.backupDir).catch((error) =>
-        console.error(`[db] backup failed: ${error instanceof Error ? error.message : String(error)}`),
+        console.error(`[db] backup failed: ${errorMessage(error)}`),
       );
     }
   };
@@ -198,7 +197,7 @@ async function main() {
     }
   } catch (error) {
     console.error(
-      `[upstream] CREDENTIAL CHECK could not run: ${error instanceof Error ? error.message : String(error)}`,
+      `[upstream] CREDENTIAL CHECK could not run: ${errorMessage(error)}`,
     );
   }
 }
@@ -216,6 +215,6 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
 }
 
 main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  console.error(errorMessage(error));
   process.exit(1);
 });

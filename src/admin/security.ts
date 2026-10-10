@@ -118,11 +118,7 @@ export async function verifyPassword(password: string, encoded: string): Promise
   return crypto.timingSafeEqual(key, expected);
 }
 
-export function safeEqual(a: string, b: string): boolean {
-  const x = crypto.createHash("sha256").update(a).digest();
-  const y = crypto.createHash("sha256").update(b).digest();
-  return crypto.timingSafeEqual(x, y);
-}
+export { safeEqual } from "../policy/tokens.js";
 
 // --- the lockout -----------------------------------------------------------
 

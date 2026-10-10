@@ -11,6 +11,7 @@
  */
 
 import { DriveError, type DriveClient, type DriveFile } from "../drive/client.js";
+import { errorMessage } from "../errors.js";
 
 export type DenyReason =
   | "not_found"
@@ -94,7 +95,7 @@ export class ScopeResolver {
       target = await fetchNode(id);
     } catch (error) {
       if (isDefiniteNo(error)) return { ok: false, reason: "not_found" };
-      return { ok: false, reason: "drive_error", detail: describe(error) };
+      return { ok: false, reason: "drive_error", detail: errorMessage(error) };
     }
     if (!target) return { ok: false, reason: "not_found" };
     if (target.trashed) return { ok: false, reason: "trashed" };
@@ -124,7 +125,7 @@ export class ScopeResolver {
         // A parent we may not see ends this path; Drive failing to answer ends
         // the whole check, because "try again" is the only honest result.
         if (isDefiniteNo(error)) continue;
-        return { ok: false, reason: "drive_error", detail: describe(error) };
+        return { ok: false, reason: "drive_error", detail: errorMessage(error) };
       }
       if (!node) continue;
       if (node.trashed) {
@@ -139,8 +140,4 @@ export class ScopeResolver {
     if (sawTrashed) return { ok: false, reason: "trashed" };
     return { ok: false, reason: "outside" };
   }
-}
-
-function describe(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

@@ -10,6 +10,7 @@ import { mkdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync, backup } from "node:sqlite";
 
+import { errorMessage } from "../errors.js";
 import { MIGRATIONS } from "./schema.js";
 
 export type Area = "docs" | "sheets" | "drive" | "calendar";
@@ -45,7 +46,8 @@ export type AuditRow = {
 
 export const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,31}$/;
 export const DEFAULT_AGENT = "default";
-const MAX_RESOURCES = 50;
+/** Resource IDs kept per audit row. */
+export const MAX_RESOURCES = 50;
 
 export class StoreError extends Error {
   constructor(
@@ -66,7 +68,7 @@ export class OpenError extends Error {
     public existed: boolean,
     cause: unknown,
   ) {
-    super(cause instanceof Error ? cause.message : String(cause));
+    super(errorMessage(cause));
   }
 }
 
@@ -271,6 +273,14 @@ export class PolicyStore {
     }));
   }
 
+  private hasScope(slug: string, folderId: string): boolean {
+    return Boolean(
+      this.db
+        .prepare("SELECT 1 FROM folder_scopes WHERE agent = ? AND folder_id = ?")
+        .get(slug, folderId),
+    );
+  }
+
   /**
    * Adds a folder to an agent's scope and confines the agent. The first folder
    * is the primary — where creates land — whatever was asked.
@@ -281,10 +291,7 @@ export class PolicyStore {
     if (slug === DEFAULT_AGENT) throw new StoreError("reserved");
     this.requireAgent(slug);
     this.tx(() => {
-      const exists = this.db
-        .prepare("SELECT 1 FROM folder_scopes WHERE agent = ? AND folder_id = ?")
-        .get(slug, folderId);
-      if (exists) throw new StoreError("exists");
+      if (this.hasScope(slug, folderId)) throw new StoreError("exists");
       const first = this.getScopes(slug).length === 0;
       const makePrimary = primary || first;
       if (makePrimary) {
@@ -308,10 +315,7 @@ export class PolicyStore {
 
   setPrimary(slug: string, folderId: string): void {
     this.tx(() => {
-      const exists = this.db
-        .prepare("SELECT 1 FROM folder_scopes WHERE agent = ? AND folder_id = ?")
-        .get(slug, folderId);
-      if (!exists) throw new StoreError("not_found");
+      if (!this.hasScope(slug, folderId)) throw new StoreError("not_found");
       this.db.prepare("UPDATE folder_scopes SET is_primary = 0 WHERE agent = ?").run(slug);
       this.db
         .prepare("UPDATE folder_scopes SET is_primary = 1 WHERE agent = ? AND folder_id = ?")

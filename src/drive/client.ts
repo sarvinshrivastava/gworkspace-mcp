@@ -7,6 +7,8 @@
  * the parent needs two endpoints and an OAuth refresh.
  */
 
+import { errorMessage } from "../errors.js";
+
 export type DriveFile = {
   id: string;
   name: string;
@@ -80,7 +82,7 @@ export class DriveClient {
         signal: this.signal(),
       });
     } catch (error) {
-      throw new DriveError(0, true, `token refresh failed: ${errorText(error)}`);
+      throw new DriveError(0, true, `token refresh failed: ${errorMessage(error)}`);
     }
     // The status only. The body of a failed refresh can echo the request.
     if (!res.ok) {
@@ -104,7 +106,7 @@ export class DriveClient {
         signal: this.signal(signal),
       });
     } catch (error) {
-      throw new DriveError(0, true, `Drive unreachable: ${errorText(error)}`);
+      throw new DriveError(0, true, `Drive unreachable: ${errorMessage(error)}`);
     }
     if (res.status === 401) {
       this.accessToken = null;
@@ -174,8 +176,4 @@ export class DriveClient {
       ...(body.incompleteSearch ? { incompleteSearch: true } : {}),
     };
   }
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

@@ -12,6 +12,7 @@ import express from "express";
 
 import type { Audit } from "../audit.js";
 import { FOLDER_MIME, type DriveClient } from "../drive/client.js";
+import { errorMessage } from "../errors.js";
 import { ID_RE } from "../enforce/guards.js";
 import type { ScopeResolver } from "../enforce/resolver.js";
 import type { SubtreeCache } from "../enforce/search.js";
@@ -36,6 +37,7 @@ import {
 import {
   agentPage,
   agentWarnings,
+  AUDIT_DECISIONS,
   agentsPage,
   auditPage,
   browsePage,
@@ -128,6 +130,9 @@ export function createAdminApp(deps: AdminDeps): express.Express {
   const page = (res: express.Response, status: number, body: string) =>
     res.status(status).type("html").send(body);
 
+  const dbUnavailable = (res: express.Response) =>
+    page(res, 503, errorPage(503, `The policy database is unavailable: ${deps.dbError() ?? "unknown error"}`));
+
   // --- login ---------------------------------------------------------------
 
   const loginState = (req: express.Request) => {
@@ -139,7 +144,7 @@ export function createAdminApp(deps: AdminDeps): express.Express {
   };
 
   app.get("/login", (req, res) => {
-    if (!deps.store()) return page(res, 503, errorPage(503, `The policy database is unavailable: ${deps.dbError() ?? "unknown error"}`));
+    if (!deps.store()) return dbUnavailable(res);
     page(res, 200, loginPage(loginState(req)));
   });
 
@@ -175,7 +180,7 @@ export function createAdminApp(deps: AdminDeps): express.Express {
 
   app.use((req, res, next) => {
     const store = deps.store();
-    if (!store) return page(res, 503, errorPage(503, `The policy database is unavailable: ${deps.dbError() ?? "unknown error"}`));
+    if (!store) return dbUnavailable(res);
     const session = sessions.get(readCookie(req.headers.cookie, COOKIE));
     if (!session) return res.redirect(303, "/login");
     if (req.method === "POST") {
@@ -347,7 +352,7 @@ export function createAdminApp(deps: AdminDeps): express.Express {
       file = await deps.resolver.node(id, true);
       root = await deps.resolver.node("root", false);
     } catch (error) {
-      return fail(`Could not check that folder with Drive: ${error instanceof Error ? error.message : String(error)}`);
+      return fail(`Could not check that folder with Drive: ${errorMessage(error)}`);
     }
     if (!file) return fail("Drive cannot find that folder, or this account cannot see it.");
     if (file.mimeType !== FOLDER_MIME) return fail("That is a file, not a folder.");
@@ -401,7 +406,7 @@ export function createAdminApp(deps: AdminDeps): express.Express {
       const folders = listing.files.map((f) => ({ id: String(f.id), name: String(f.name ?? "") }));
       page(res, 200, browsePage({ slug: agent.slug, parent, folders, csrf: ctx(res).session.csrf }));
     } catch (error) {
-      page(res, 502, errorPage(502, `Drive did not answer: ${error instanceof Error ? error.message : String(error)}`));
+      page(res, 502, errorPage(502, `Drive did not answer: ${errorMessage(error)}`));
     }
   });
 
@@ -434,7 +439,7 @@ export function createAdminApp(deps: AdminDeps): express.Express {
     const { session, store } = ctx(res);
     const agent = typeof req.query.agent === "string" && req.query.agent ? req.query.agent : undefined;
     const decision =
-      typeof req.query.decision === "string" && ["allow", "mutate", "deny", "error"].includes(req.query.decision)
+      typeof req.query.decision === "string" && AUDIT_DECISIONS.includes(req.query.decision)
         ? req.query.decision
         : undefined;
     const rows = store.queryAudit({ agent, decision, limit: 200 });

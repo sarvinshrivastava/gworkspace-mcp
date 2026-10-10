@@ -4,7 +4,7 @@
  */
 
 import { AREAS, OPS, TOOL_MAP } from "../policy/derive.js";
-import type { AgentRow, AuditRow, Grant, Scope, TokenRow } from "../policy/store.js";
+import { DEFAULT_AGENT, type AgentRow, type AuditRow, type Grant, type Scope, type TokenRow } from "../policy/store.js";
 import { html, layout, raw, type Safe } from "./html.js";
 
 const when = (ms: number | null) => (ms === null ? "—" : `${new Date(ms).toISOString().replace("T", " ").slice(0, 19)} UTC`);
@@ -14,20 +14,30 @@ const csrfField = (csrf: string) => html`<input type="hidden" name="_csrf" value
 const notes = (items: string[], kind: "note" | "error") =>
   items.map((text) => html`<div class="${kind}">${text}</div>`);
 
-export function loginPage(state: "starting" | "unconfigured" | "locked" | "form", error?: string): string {
-  const body =
-    state === "starting"
-      ? html`<div class="note">Starting — the service is still reading its configuration. Try again in a moment.</div>`
-      : state === "unconfigured"
-        ? html`<div class="note">Dashboard login is not configured. Store the output of <code>npm run hash-password</code> as <code>DASHBOARD_ADMIN_PASSWORD_HASH</code> in the vault and restart.</div>`
-        : state === "locked"
-          ? html`<div class="error">Too many failed logins. Locked for 15 minutes. Every tunnel connection shares one source address, so this lock applies to everyone; restarting the container clears it.</div>`
-          : html`${error ? html`<div class="error">${error}</div>` : ""}
+/** The audit page's decision filter, in display order. */
+export const AUDIT_DECISIONS: readonly string[] = ["allow", "mutate", "deny", "error"];
+
+type LoginState = "starting" | "unconfigured" | "locked" | "form";
+
+function loginBody(state: LoginState, error?: string): Safe {
+  switch (state) {
+    case "starting":
+      return html`<div class="note">Starting — the service is still reading its configuration. Try again in a moment.</div>`;
+    case "unconfigured":
+      return html`<div class="note">Dashboard login is not configured. Store the output of <code>npm run hash-password</code> as <code>DASHBOARD_ADMIN_PASSWORD_HASH</code> in the vault and restart.</div>`;
+    case "locked":
+      return html`<div class="error">Too many failed logins. Locked for 15 minutes. Every tunnel connection shares one source address, so this lock applies to everyone; restarting the container clears it.</div>`;
+    case "form":
+      return html`${error ? html`<div class="error">${error}</div>` : ""}
             <form method="post" action="/login" class="row">
               <input type="password" name="password" autocomplete="current-password" aria-label="Password" required autofocus>
               <button type="submit">Log in</button>
             </form>`;
-  return layout("Log in", html`<section><h1>gworkspace-mcp admin</h1>${body}</section>`);
+  }
+}
+
+export function loginPage(state: LoginState, error?: string): string {
+  return layout("Log in", html`<section><h1>gworkspace-mcp admin</h1>${loginBody(state, error)}</section>`);
 }
 
 export function errorPage(status: number, message: string): string {
@@ -96,7 +106,7 @@ export function agentsPage(p: {
     (a) => html`<tr>
       <td><a href="/agents/${a.slug}"><code>${a.slug}</code></a><br><span class="muted">${a.name}</span></td>
       <td>${a.tools.length}</td>
-      <td>${a.slug === "default" ? `legacy bearer + ${a.activeTokens}` : a.activeTokens}</td>
+      <td>${a.slug === DEFAULT_AGENT ? `legacy bearer + ${a.activeTokens}` : a.activeTokens}</td>
       <td>${scopeBadge(a)}</td>
     </tr>`,
   );
@@ -129,7 +139,7 @@ export function agentPage(p: {
   warnings: string[];
 }): string {
   const a = p.agent;
-  const isDefault = a.slug === "default";
+  const isDefault = a.slug === DEFAULT_AGENT;
   const granted = (area: string, op: string) => p.grants.some((g) => g.area === area && g.op === op);
 
   const grid = html`<table><thead><tr><th>Area</th>${OPS.map((op) => html`<th>${op}</th>`)}</tr></thead><tbody>
@@ -230,9 +240,14 @@ export function auditPage(p: {
 }): string {
   const option = (value: string, current: string | undefined, label = value) =>
     html`<option value="${value}" ${value === (current ?? "") ? raw("selected") : ""}>${label}</option>`;
+  const badgeClass = (decision: AuditRow["decision"]) => {
+    if (decision === "deny" || decision === "error") return "bad";
+    if (decision === "mutate") return "warn";
+    return "ok";
+  };
   const rows = p.rows.map(
     (r) => html`<tr><td>${when(r.ts)}</td><td>${r.kind}</td><td>${r.agent ?? "—"}</td><td>${r.tool ?? "—"}</td>
-      <td><span class="badge ${r.decision === "deny" || r.decision === "error" ? "bad" : r.decision === "mutate" ? "warn" : "ok"}">${r.decision}</span></td>
+      <td><span class="badge ${badgeClass(r.decision)}">${r.decision}</span></td>
       <td>${r.reason}</td><td>${r.resources.map((id) => html`<code>${id}</code> `)}</td><td>${r.source}</td></tr>`,
   );
   return layout(
@@ -240,7 +255,7 @@ export function auditPage(p: {
     html`<section><h1>Audit log</h1>
       <form method="get" action="/audit" class="row">
         <select name="agent" aria-label="Agent">${option("", p.agent, "all agents")}${p.agents.map((a) => option(a, p.agent))}</select>
-        <select name="decision" aria-label="Decision">${option("", p.decision, "all decisions")}${["allow", "mutate", "deny", "error"].map((d) => option(d, p.decision))}</select>
+        <select name="decision" aria-label="Decision">${option("", p.decision, "all decisions")}${AUDIT_DECISIONS.map((d) => option(d, p.decision))}</select>
         <button type="submit">Filter</button></form>
       <p class="muted">Newest 200. Resource IDs only; argument values and results are never recorded. Kept 90 days.</p>
       <div class="wrap"><table><thead><tr><th>Time</th><th>Kind</th><th>Agent</th><th>Tool</th><th>Decision</th><th>Reason</th><th>Resources</th><th>Source</th></tr></thead>

@@ -14,6 +14,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 import { config } from "./config.js";
+import { errorMessage } from "./errors.js";
 
 export type UpstreamTool = {
   name: string;
@@ -116,7 +117,7 @@ export function normaliseToken(raw: string): string {
     parsed = JSON.parse(value) as { refresh_token?: unknown };
   } catch (error) {
     // Describe the SHAPE, never the content: this value is a credential.
-    const why = error instanceof Error ? error.message : String(error);
+    const why = errorMessage(error);
     throw new Error(
       `FATAL: GOOGLE_TOKEN_JSON is not valid JSON (${why}). It is ${value.length} characters over ${value.split("\n").length} line(s), starts with ${JSON.stringify(value.slice(0, 2))} and ends with ${JSON.stringify(value.slice(-2))}. Expected either the whole token.json, or the bare refresh token starting "1//".`,
     );

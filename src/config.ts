@@ -14,6 +14,12 @@ const env = (key: string, fallback?: string): string => {
   return value;
 };
 
+const envList = (key: string): string[] =>
+  (process.env[key] ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
 export const config = {
   port: Number(env("PORT", "3014")),
 
@@ -25,10 +31,7 @@ export const config = {
   backupDir: env("BACKUP_DIR", "/state/backups"),
 
   /** Extra exact source addresses allowed on the admin port, comma-separated. */
-  adminAllowedSources: (process.env.ADMIN_ALLOWED_SOURCES ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean),
+  adminAllowedSources: envList("ADMIN_ALLOWED_SOURCES"),
 
   /** The pinned upstream server's entry point, inside this image. */
   upstreamEntry: env(
@@ -55,10 +58,7 @@ export const config = {
    * tools per message, and the full set measured 126 KB, ~31k tokens, resent on
    * every LLM call of every turn. Empty exposes NOTHING; see selectTools.
    */
-  toolAllowlist: (process.env.TOOL_ALLOWLIST ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean),
+  toolAllowlist: envList("TOOL_ALLOWLIST"),
 
   vault: {
     url: env("SECRETS_MANAGER_URL", "http://secret-manager:8000"),

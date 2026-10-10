@@ -8,6 +8,7 @@
  */
 
 import { hashPassword } from "./admin/security.js";
+import { errorMessage } from "./errors.js";
 
 function readHidden(prompt: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -60,6 +61,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  console.error(errorMessage(error));
   process.exit(1);
 });

@@ -7,10 +7,8 @@
  * the break-glass path by accident.
  */
 
-import crypto from "node:crypto";
-
 import { DEFAULT_GRANTS } from "./derive.js";
-import { hashToken } from "./tokens.js";
+import { hashToken, safeEqual } from "./tokens.js";
 import { DEFAULT_AGENT, type Grant, type PolicyStore, type Scope } from "./store.js";
 
 export type AgentContext = {
@@ -24,11 +22,7 @@ export type Authenticator = (bearer: string) => AgentContext | null;
 
 function legacyMatches(provided: string, legacy: string): boolean {
   if (!legacy) return false;
-  // Digest both sides first: timingSafeEqual throws on a length mismatch, which
-  // would itself be the leak.
-  const a = crypto.createHash("sha256").update(provided).digest();
-  const b = crypto.createHash("sha256").update(legacy).digest();
-  return crypto.timingSafeEqual(a, b);
+  return safeEqual(provided, legacy);
 }
 
 export function loadContext(store: PolicyStore, slug: string): AgentContext | null {
