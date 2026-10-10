@@ -166,6 +166,25 @@ jobs:
           fi
           echo "all four service secrets are present and usable"
 
+          # The dashboard password hash is optional at runtime (login is just
+          # disabled without it), so absence is a warning. A malformed one is an
+          # error: the service would read it and refuse every login.
+          set +e
+          hash="$(vault_fetch DASHBOARD_ADMIN_PASSWORD_HASH 2>/dev/null)"
+          rc=$?
+          set -e
+          if [ $rc -eq 2 ]; then
+            echo "::error::vault unreachable while checking DASHBOARD_ADMIN_PASSWORD_HASH — not deploying against an unknown state"
+            exit 1
+          elif [ $rc -ne 0 ] || [ -z "$hash" ]; then
+            echo "::warning::DASHBOARD_ADMIN_PASSWORD_HASH is not in vault folder ${VAULT_FOLDER} — the admin dashboard will refuse every login. Make one with \`npm run build && npm run hash-password\`."
+          elif ! [[ "$hash" =~ ^scrypt\$[0-9]+\$[0-9]+\$[0-9]+\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$ ]]; then
+            echo "::error::DASHBOARD_ADMIN_PASSWORD_HASH is not a scrypt\$N\$r\$p\$salt\$key hash (${#hash} characters). Store the exact output of npm run hash-password."
+            exit 1
+          else
+            echo "DASHBOARD_ADMIN_PASSWORD_HASH: present"
+          fi
+
       - name: Verify the tag exists before touching the VPS
         run: |
           set -euo pipefail
@@ -245,7 +264,17 @@ jobs:
             restarts=$(( total - base_restarts ))
             [ "$restarts" -lt 0 ] && restarts=0
             echo "attempt $i: health=$status restarts=$restarts"
-            [ "$status" = "healthy" ] && exit 0
+            if [ "$status" = "healthy" ]; then
+              # Healthy is not enough: without its volume the service boots in a
+              # degraded mode that still answers 200 but refuses every minted
+              # token. That is a failed deploy, not a green one.
+              if docker exec gworkspace-mcp node -e "fetch('http://localhost:3014/healthz').then(r=>r.json()).then(j=>process.exit(j.db?0:1)).catch(()=>process.exit(1))"; then
+                exit 0
+              fi
+              echo "::error::gworkspace-mcp is up but its policy database is not (healthz db=false) — is the gworkspace-state volume mounted?"
+              docker logs --tail 50 gworkspace-mcp 2>&1 | grep -E "\[db\]|FATAL" || true
+              exit 1
+            fi
             if [ "$status" = "missing" ]; then docker logs --tail 50 gworkspace-mcp 2>&1 || true; exit 1; fi
             if [ "$restarts" -gt 2 ]; then echo "crash-looping"; docker logs --tail 100 gworkspace-mcp 2>&1 || true; exit 1; fi
             sleep 10
@@ -262,4 +291,6 @@ jobs:
             echo "Tag: \`${{ inputs.image_tag }}\`"
             echo ""
             echo "Wire it in Open WebUI: Admin → Settings → Integrations → MCP → \`http://gworkspace-mcp:3014/mcp\`, auth Bearer."
+            echo ""
+            echo "Admin dashboard: \`ssh -N -L 3015:127.0.0.1:3015 root@<vps>\`, then open http://localhost:3015"
           } >> "$GITHUB_STEP_SUMMARY"

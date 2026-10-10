@@ -13,12 +13,24 @@ services:
     container_name: gworkspace-mcp
     restart: unless-stopped
 
-    # Not published to the host at all: unlike pages, nothing here is public.
+    # MCP (:3014) is not published to the host at all: unlike pages, nothing
+    # here is public. The admin dashboard (:3015) is published on the host's
+    # loopback only, for an SSH tunnel:
+    #   ssh -N -L 3015:127.0.0.1:3015 root@<vps>   then   http://localhost:3015
+    # Other containers on `shared` can still reach :3015 by name; the app refuses
+    # any source address that is not a bridge gateway (where host traffic
+    # arrives). Not even loopback: inside the container that is the upstream
+    # child. ADMIN_ALLOWED_SOURCES adds exact addresses if ever needed.
     expose:
       - '3014'
+    ports:
+      - '127.0.0.1:3015:3015'
 
     environment:
       PORT: '3014'
+      ADMIN_PORT: '3015'
+      DB_PATH: '/state/gworkspace-v2.sqlite'
+      BACKUP_DIR: '/state/backups'
       CONFIG_HOME: '/data/config'
       TOKEN_DIR: '/data/config/google-docs-mcp'
       # This process only. The child gets its own budget (CHILD_HEAP_MB), set
@@ -47,6 +59,25 @@ services:
       - /data:uid=1000,gid=1000,mode=0700,size=8m
       - /tmp:size=16m
 
+    # The policy database: agents, grants, folder scopes, token HASHES and the
+    # audit log. No plaintext secret lives here. Backups land in
+    # /state/backups/policy-<weekday>.sqlite (UTC, seven kept, same volume —
+    # they cover corruption and bad edits, not losing the volume).
+    #
+    # Restore, exactly in this order (a stale -wal replayed over a restored file
+    # corrupts it):
+    #   docker compose stop gworkspace-mcp
+    #   V=$(docker volume inspect -f '{{.Mountpoint}}' gworkspace-mcp_gworkspace-state)
+    #   rm -f "$V/gworkspace-v2.sqlite-wal" "$V/gworkspace-v2.sqlite-shm"
+    #   cp "$V/backups/policy-N.sqlite" "$V/gworkspace-v2.sqlite"
+    #   chown 1000:1000 "$V/gworkspace-v2.sqlite"
+    #   docker compose start gworkspace-mcp
+    # A full reset deletes gworkspace-v2.sqlite AND its -wal/-shm, or the deleted
+    # data comes back. If this volume is missing the service still boots, in a
+    # degraded mode (/healthz "db": false) that only serves the legacy bearer.
+    volumes:
+      - gworkspace-state:/state
+
     networks:
       - shared # open-webui reaches /mcp by name
       - vault # secret-manager, for credentials at boot
@@ -68,7 +99,7 @@ services:
       - 'no-new-privileges:true'
     cap_drop:
       - ALL
-    # Nothing writes outside /data and /tmp, both tmpfs above.
+    # Nothing writes outside /data and /tmp (tmpfs) and /state (the volume).
     read_only: true
 
     healthcheck:
@@ -91,6 +122,9 @@ services:
       options:
         max-size: '10m'
         max-file: '3'
+
+volumes:
+  gworkspace-state: {}
 
 networks:
   shared:
