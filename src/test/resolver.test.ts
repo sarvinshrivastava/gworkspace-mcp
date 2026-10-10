@@ -159,3 +159,13 @@ test("the cache evicts least-recently-used entries", async () => {
   await r.node("doc-in-sub-1", false);
   assert.equal(drive.getCalls.length, before + 1);
 });
+
+test("E8: one cache serves agents with different scopes without leaking verdicts", async () => {
+  const drive = tree();
+  const r = new ScopeResolver(() => drive);
+  const other = new Set(["other-folder"]);
+  assert.equal((await r.check("doc-in-F-001", F, false)).ok, true);
+  assert.deepEqual(await r.check("doc-in-F-001", other, false), { ok: false, reason: "outside" });
+  assert.equal((await r.check("doc-outside1", other, false)).ok, true);
+  assert.deepEqual(await r.check("doc-outside1", F, false), { ok: false, reason: "outside" });
+});

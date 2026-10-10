@@ -529,3 +529,34 @@ test("the first-run note is not shown when archived agents exist", async () => {
   await request(url, "/agents/gone/archive", { cookie, form: { _csrf: csrf } });
   assert.doesNotMatch((await request(url, "/", { cookie })).text, /Only the <code>default<\/code> agent exists/);
 });
+
+test("E11: a folder alias is stored under Drive's canonical ID", async () => {
+  const { url, store, drive } = await boot();
+  // Drive answers an alias ID with the folder's real ID.
+  drive.files.set("alias-to-F-01", { ...drive.files.get("scope-F-0001")! });
+  const { cookie, csrf } = await login(url);
+  await request(url, "/agents", { cookie, form: { slug: "c1", name: "C", _csrf: csrf } });
+  await request(url, "/agents/c1/scopes", { cookie, form: { folder: "alias-to-F-01", _csrf: csrf } });
+  assert.deepEqual(store.getScopes("c1").map((s) => s.folderId), ["scope-F-0001"]);
+});
+
+test("E23: the locked login page says the lock is shared and how to clear it", async () => {
+  const { url } = await boot();
+  for (let i = 0; i < 5; i++) await request(url, "/login", { form: { password: "nope" } });
+  const text = (await request(url, "/login")).text;
+  assert.match(text, /Locked for 15 minutes/);
+  assert.match(text, /restarting the container clears it/);
+});
+
+test("revoking an already-revoked token is a harmless no-op", async () => {
+  const { url, store } = await boot();
+  const { cookie, csrf } = await login(url);
+  await request(url, "/agents", { cookie, form: { slug: "v1", name: "V", _csrf: csrf } });
+  await request(url, "/agents/v1/tokens", { cookie, form: { _csrf: csrf } });
+  const [token] = store.listTokens("v1");
+  await request(url, `/tokens/${token!.id}/revoke`, { cookie, form: { _csrf: csrf } });
+  const firstRevokedAt = store.getToken(token!.id)!.revokedAt;
+  const again = await request(url, `/tokens/${token!.id}/revoke`, { cookie, form: { _csrf: csrf } });
+  assert.equal(again.status, 303);
+  assert.equal(store.getToken(token!.id)!.revokedAt, firstRevokedAt);
+});
