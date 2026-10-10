@@ -256,7 +256,11 @@ jobs:
 
           export SECRETS_MANAGER_TOKEN="$SM_TOKEN"
           docker compose -f docker-compose.yml pull
-          docker compose -f docker-compose.yml up -d --remove-orphans
+          # --force-recreate: every credential (vault token, Google token, the
+          # dashboard hash) is read at BOOT. Without it, `up` sees the same image
+          # and compose file, leaves the old container running, and a rotated
+          # secret never takes effect — while this run still reports green.
+          docker compose -f docker-compose.yml up -d --remove-orphans --force-recreate
           unset SECRETS_MANAGER_TOKEN
           docker logout "$REGISTRY" || true
           REMOTE_SCRIPT
@@ -282,6 +286,19 @@ jobs:
               # degraded mode that still answers 200 but refuses every minted
               # token. That is a failed deploy, not a green one.
               if docker exec gworkspace-mcp node -e "fetch('http://localhost:3014/healthz').then(r=>r.json()).then(j=>process.exit(j.db?0:1)).catch(()=>process.exit(1))"; then
+                # Healthy says nothing about Google: the boot probe runs just
+                # after. An expired or revoked refresh token boots fine and fails
+                # every call, so surface the probe's verdict on the run.
+                for _ in $(seq 1 12); do
+                  verdict=$(docker logs gworkspace-mcp 2>&1 | grep -E "credential verified|CREDENTIAL CHECK" | tail -1)
+                  [ -n "$verdict" ] && break
+                  sleep 5
+                done
+                case "$verdict" in
+                  *"credential verified"*) echo "Google credential verified" ;;
+                  "") echo "::warning::the Google credential check did not report within 60s — check docker logs" ;;
+                  *) echo "::warning::${verdict#*] } — the service is up but every Workspace call will fail until GOOGLE_TOKEN_JSON is fixed" ;;
+                esac
                 exit 0
               fi
               echo "::error::gworkspace-mcp is up but its policy database is not (healthz db=false) — is the gworkspace-state volume mounted?"
