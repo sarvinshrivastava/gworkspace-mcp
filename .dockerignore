@@ -5,3 +5,6 @@ dist
 *.md
 .env
 .env.*
+dist-test
+docs
+learnings

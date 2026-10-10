@@ -9,3 +9,4 @@ __*.mjs
 # carries the integrity hashes that make the build verifiable.
 bun.lock
 bun.lockb
+dist-test/
