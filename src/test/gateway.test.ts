@@ -11,6 +11,7 @@ import { DEFAULT_GRANTS } from "../policy/derive.js";
 import { mintToken } from "../policy/tokens.js";
 import {
   FakeDrive,
+  retryable,
   FakeUpstream,
   TODAYS_TOOLS,
   callTool,
@@ -25,7 +26,7 @@ import {
 const servers: Server[] = [];
 after(() => servers.forEach((s) => s.close()));
 
-async function boot(opts: { ready?: boolean; withUpstream?: boolean } = {}) {
+async function boot(opts: { ready?: boolean; withUpstream?: boolean; withheld?: { scoped: Set<string>; all: Set<string> } } = {}) {
   const store = tempStore();
   store.ensureDefaultAgent(DEFAULT_GRANTS);
   const audit = new Audit(store);
@@ -36,6 +37,7 @@ async function boot(opts: { ready?: boolean; withUpstream?: boolean } = {}) {
   drive.add("doc-outside1", ["other-folder"], { name: "outside doc" });
   const upstreamClient = new FakeUpstream();
   const upstream = fakeUpstreamState(opts.withUpstream === false ? null : upstreamClient);
+  if (opts.withheld) upstream.withheld = opts.withheld;
   const subtree = new SubtreeCache(() => drive);
   let ready = opts.ready ?? true;
   const deps: GatewayDeps = {
@@ -56,7 +58,7 @@ async function boot(opts: { ready?: boolean; withUpstream?: boolean } = {}) {
     const id = store.insertToken(slug, t.hash, t.prefix, "");
     return { token: t.plaintext, id };
   };
-  return { url, store, audit, drive, upstreamClient, agent, setReady: (v: boolean) => (ready = v) };
+  return { url, store, audit, drive, upstreamClient, upstream, deps, agent, setReady: (v: boolean) => (ready = v) };
 }
 
 const toolNames = (reply: { body: any }) => reply.body.result.tools.map((t: { name: string }) => t.name);
@@ -215,4 +217,62 @@ test("healthz: 503 without upstream, 200 with, and reports the db", async () => 
   const body = (await ok.json()) as { db: boolean; tools: number };
   assert.equal(body.db, true);
   assert.equal(body.tools, 20);
+});
+
+test("tripwire-withheld tools disappear from tools/list and never reach upstream", async () => {
+  const { url, agent, upstreamClient } = await boot({
+    withheld: { scoped: new Set(["readDocument"]), all: new Set(["quickAddEvent"]) },
+  });
+  const { token } = agent("a1", DEFAULT_GRANTS, "scope-F-0001");
+  const confinedTools = toolNames(await listTools(url, token));
+  assert.ok(!confinedTools.includes("readDocument"));
+  assert.ok(!confinedTools.includes("quickAddEvent"));
+  const legacyTools = toolNames(await listTools(url, "legacy-token"));
+  assert.ok(legacyTools.includes("readDocument"));
+  assert.ok(!legacyTools.includes("quickAddEvent"));
+  const reply = await callTool(url, token, "readDocument", { documentId: "doc-in-F-001" });
+  assert.ok(reply.body.error || reply.body.result?.isError);
+  assert.equal(upstreamClient.calls.length, 0);
+});
+
+test("a Drive outage during a served search is 'try again', audited as drive_error", async () => {
+  const { url, agent, drive, store } = await boot();
+  const { token } = agent("a1", DEFAULT_GRANTS, "scope-F-0001");
+  drive.listError = retryable();
+  const reply = await callTool(url, token, "searchDriveFiles", { query: "doc" });
+  assert.equal(reply.body.result.isError, true);
+  assert.match(reply.body.result.content[0].text, /try again/);
+  assert.doesNotMatch(reply.body.result.content[0].text, /503/);
+  assert.equal(store.queryAudit({ agent: "a1", limit: 1 })[0]!.reason, "drive_error");
+});
+
+test("an oversized scope is denied as too_large", async () => {
+  const { url, agent, drive, store } = await boot();
+  for (let i = 0; i < 501; i++) drive.folder(`big-${String(i).padStart(4, "0")}-xxxx`, ["scope-F-0001"]);
+  const { token } = agent("a1", DEFAULT_GRANTS, "scope-F-0001");
+  const reply = await callTool(url, token, "searchDriveFiles", { query: "doc" });
+  assert.match(reply.body.result.content[0].text, /over 500 folders/);
+  assert.equal(store.queryAudit({ agent: "a1", limit: 1 })[0]!.reason, "too_large");
+});
+
+test("a call while the child is down is still audited", async () => {
+  const { url, store } = await boot({ withUpstream: false });
+  await callTool(url, "legacy-token", "readDocument", { documentId: "doc-in-F-001" });
+  assert.equal(store.queryAudit({ agent: "default", limit: 1 })[0]!.reason, "upstream_down");
+});
+
+test("a policy DB that cannot answer is 503, not 401 or a stack trace", async () => {
+  const { url, deps } = await boot();
+  deps.authenticate = () => () => {
+    throw new Error("SQLITE_BUSY");
+  };
+  const { result } = await quietly(() => listTools(url, "legacy-token"));
+  assert.equal(result.status, 503);
+  assert.deepEqual(result.body, { error: "policy unavailable" });
+});
+
+test("the legacy agent's audit names the file it touched", async () => {
+  const { url, store } = await boot();
+  await callTool(url, "legacy-token", "readDocument", { documentId: "doc-outside1" });
+  assert.deepEqual(store.queryAudit({ agent: "default", limit: 1 })[0]!.resources, ["doc-outside1"]);
 });

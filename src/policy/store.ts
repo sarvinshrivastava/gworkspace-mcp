@@ -6,7 +6,7 @@
  * native addon to build under `npm ci --ignore-scripts` on Alpine.
  */
 
-import { mkdirSync, statSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync, backup } from "node:sqlite";
 
@@ -306,11 +306,25 @@ export class PolicyStore {
     });
   }
 
-  /** Removing the last folder leaves the agent confined, with no Drive access. */
+  /**
+   * Removing the last folder leaves the agent confined, with no Drive access.
+   * Removing the primary promotes the oldest remaining folder, so creates keep
+   * landing somewhere the admin chose rather than failing with no_primary.
+   */
   removeScope(slug: string, folderId: string): void {
-    this.db
-      .prepare("DELETE FROM folder_scopes WHERE agent = ? AND folder_id = ?")
-      .run(slug, folderId);
+    this.tx(() => {
+      if (!this.hasScope(slug, folderId)) throw new StoreError("not_found");
+      this.db
+        .prepare("DELETE FROM folder_scopes WHERE agent = ? AND folder_id = ?")
+        .run(slug, folderId);
+      // getScopes orders primary first, then oldest first.
+      const remaining = this.getScopes(slug);
+      if (remaining.length && !remaining[0]!.isPrimary) {
+        this.db
+          .prepare("UPDATE folder_scopes SET is_primary = 1 WHERE agent = ? AND folder_id = ?")
+          .run(slug, remaining[0]!.folderId);
+      }
+    });
   }
 
   setPrimary(slug: string, folderId: string): void {
@@ -438,14 +452,33 @@ function parseResources(text: string): string[] {
  * One backup per weekday, overwritten a week later. On the same volume as the
  * database: it protects against corruption and bad edits, not against losing
  * the volume.
+ *
+ * Written to a temporary file and renamed, so a backup that dies half way
+ * never replaces last week's good copy. A file already written today (UTC) is
+ * kept: the boot-time run must not overwrite this morning's copy with state a
+ * bad edit just produced.
  */
 export async function backupDaily(
   store: PolicyStore,
   dir: string,
   now: Date = new Date(),
-): Promise<string> {
+): Promise<string | null> {
   mkdirSync(dir, { recursive: true });
   const target = path.join(dir, `policy-${now.getUTCDay()}.sqlite`);
-  await backup(store.db, target);
+  try {
+    const written = statSync(target).mtime;
+    if (written.toISOString().slice(0, 10) === now.toISOString().slice(0, 10)) return null;
+  } catch {
+    // No copy for this weekday yet.
+  }
+  const temp = `${target}.tmp`;
+  rmSync(temp, { force: true });
+  try {
+    await backup(store.db, temp);
+    renameSync(temp, target);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
   return target;
 }

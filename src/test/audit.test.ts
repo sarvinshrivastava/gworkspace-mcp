@@ -23,7 +23,7 @@ test("tool and admin rows carry their kind and decision", () => {
   const store = tempStore();
   const audit = new Audit(store);
   audit.tool({ slug: "a1" }, "readDocument", "deny", "outside", ["doc-id-123456"]);
-  audit.admin("grants.set", ["a1"], "127.0.0.1");
+  audit.admin("grants.set", "a1", ["a1"], "127.0.0.1");
   const [admin, tool] = store.queryAudit({ limit: 10 });
   assert.equal(tool!.kind, "tool");
   assert.deepEqual(tool!.resources, ["doc-id-123456"]);

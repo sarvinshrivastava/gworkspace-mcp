@@ -283,13 +283,34 @@ test("backupDaily writes one file per weekday and overwrites a week later", asyn
   store.ensureDefaultAgent(DEFAULT_GRANTS);
   const dir = path.join(tempDir(), "backups");
   const monday = new Date(Date.UTC(2026, 9, 5));
-  const first = await backupDaily(store, dir, monday);
+  const first = (await backupDaily(store, dir, monday))!;
   assert.equal(path.basename(first), "policy-1.sqlite");
   store.createAgent("later", "Later");
-  const again = await backupDaily(store, dir, new Date(Date.UTC(2026, 9, 12)));
+  const again = (await backupDaily(store, dir, new Date(Date.UTC(2026, 9, 12))))!;
   assert.equal(again, first);
   assert.ok(existsSync(again));
   const restored = openPolicyStore(again);
   assert.ok(restored.getAgent("later"));
   restored.close();
+});
+
+test("backupDaily keeps a copy already written today", async () => {
+  const store = tempStore();
+  const dir = path.join(tempDir(), "backups");
+  const today = new Date();
+  assert.ok(await backupDaily(store, dir, today));
+  assert.equal(await backupDaily(store, dir, today), null);
+  assert.ok(!existsSync(`${path.join(dir, `policy-${today.getUTCDay()}.sqlite`)}.tmp`));
+});
+
+test("removing the primary promotes the oldest remaining folder", () => {
+  let now = 0;
+  const store = new PolicyStore(new DatabaseSync(":memory:"), MIGRATIONS, () => ++now);
+  store.createAgent("a1", "A");
+  store.addScope("a1", "folder-one-xxxx", "One", false);
+  store.addScope("a1", "folder-two-xxxx", "Two", false);
+  store.addScope("a1", "folder-three-xx", "Three", true);
+  store.removeScope("a1", "folder-three-xx");
+  assert.deepEqual(store.getScopes("a1").filter((s) => s.isPrimary).map((s) => s.folderId), ["folder-one-xxxx"]);
+  assert.throws(() => store.removeScope("a1", "missing-folder"), code("not_found"));
 });

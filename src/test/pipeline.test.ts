@@ -7,7 +7,7 @@ import { ScopeResolver } from "../enforce/resolver.js";
 import { SubtreeCache } from "../enforce/search.js";
 import { DEFAULT_GRANTS } from "../policy/derive.js";
 import type { AgentContext } from "../policy/auth.js";
-import { FakeDrive, quietly } from "./helpers.js";
+import { FakeDrive, quietly, retryable } from "./helpers.js";
 
 function setup() {
   const drive = new FakeDrive();
@@ -199,4 +199,39 @@ test("searchDriveFiles skips trashed roots; all trashed is denied", async () => 
 test("withheld list tools are refused if they ever reach the pipeline", async () => {
   const { deps } = setup();
   assert.equal(reasonOf(await planCall(confined(), "listDocuments", {}, deps)), "unmapped");
+});
+
+test("a Drive outage on one scope root fails the search as drive_error, not partial", async () => {
+  const { deps, drive } = setup();
+  drive.folder("scope-G-0001", ["root-folder1"]);
+  drive.errors.set("scope-G-0001", retryable());
+  const two = confined({
+    scopes: [
+      { folderId: "scope-F-0001", folderName: "F", isPrimary: true },
+      { folderId: "scope-G-0001", folderName: "G", isPrimary: false },
+    ],
+  });
+  assert.equal(reasonOf(await planCall(two, "searchDriveFiles", { query: "x" }, deps)), "drive_error");
+});
+
+test("a Drive outage on the primary is drive_error, not 'folder missing'", async () => {
+  const { deps, drive } = setup();
+  drive.errors.set("scope-F-0001", retryable());
+  assert.equal(reasonOf(await planCall(confined(), "createDocument", { title: "t" }, deps)), "drive_error");
+  assert.equal(reasonOf(await planCall(confined(), "listDriveFiles", {}, deps)), "drive_error");
+});
+
+test("the primary is checked live for creates", async () => {
+  const { deps, drive } = setup();
+  await planCall(confined(), "listDriveFiles", {}, deps); // warms the cache
+  drive.files.get("scope-F-0001")!.trashed = true;
+  assert.equal(reasonOf(await planCall(confined(), "createDocument", { title: "t" }, deps)), "primary_unavailable");
+});
+
+test("unconfined: createFolder flushes the subtree; reads name their file", async () => {
+  const { deps } = setup();
+  const folder = await planCall(unconfined, "createFolder", { name: "n" }, deps);
+  assert.ok((folder as { after?: () => void }).after);
+  const read = await planCall(unconfined, "readDocument", { documentId: "doc-outside1" }, deps);
+  assert.deepEqual((read as { resources: string[] }).resources, ["doc-outside1"]);
 });

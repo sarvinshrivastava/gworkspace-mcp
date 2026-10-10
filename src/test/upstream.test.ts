@@ -15,6 +15,7 @@ import {
   tripwire,
   type UpstreamTool,
 } from "../upstream.js";
+import { quietly } from "./helpers.js";
 
 const tool = (name: string, keys: string[] = []): UpstreamTool => ({
   name,
@@ -34,6 +35,12 @@ test("selectTools keeps the first of a duplicate name", () => {
   const got = selectTools([first, tool("a", ["y"])], ["a"]);
   assert.equal(got.length, 1);
   assert.equal(got[0], first);
+});
+
+test("selectTools warns about an allowlisted name the upstream lacks", async () => {
+  const { result, logs } = await quietly(() => selectTools([tool("a")], ["a", "typo"]));
+  assert.equal(result.length, 1);
+  assert.ok(logs.some((l) => /not found upstream, ignored: typo/.test(l)));
 });
 
 test("selectTools exposes nothing on an empty allowlist", () => {

@@ -12,6 +12,7 @@ import type { CallToolResult } from "@modelcontextprotocol/server";
 import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
 
 import type { Audit } from "./audit.js";
+import { DriveError } from "./drive/client.js";
 import { denyMessage, planCall, type PipelineDeps } from "./enforce/pipeline.js";
 import { ScopeTooLarge } from "./enforce/search.js";
 import { errorMessage } from "./errors.js";
@@ -71,7 +72,10 @@ export function createServer(ctx: AgentContext, deps: GatewayDeps): McpServer {
         console.log(`[tool] ${ctx.slug} ${tool.name} (${Object.keys(raw).join(", ")})`);
         const audit = deps.audit();
         const upstream = deps.upstream.client;
-        if (!upstream) return fail("the Workspace server has exited.");
+        if (!upstream) {
+          audit?.tool(ctx, tool.name, "error", "upstream_down", []);
+          return fail("the Workspace server has exited.");
+        }
 
         let resources: string[] = [];
         try {
@@ -92,6 +96,12 @@ export function createServer(ctx: AgentContext, deps: GatewayDeps): McpServer {
               if (error instanceof ScopeTooLarge) {
                 audit?.tool(ctx, tool.name, "deny", "too_large", plan.resources);
                 return fail(denyMessage("too_large"));
+              }
+              // Drive not answering (rate limit, 5xx, timeout): "try again",
+              // as everywhere else — never Drive's raw status text.
+              if ((error instanceof DriveError && error.retryable) || isAbort(error)) {
+                audit?.tool(ctx, tool.name, "deny", "drive_error", plan.resources);
+                return fail(denyMessage("drive_error"));
               }
               throw error;
             }
@@ -151,7 +161,16 @@ export function createMcpApp(deps: GatewayDeps): express.Express {
       return;
     }
     const provided = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
-    const ctx = deps.authenticate()(provided);
+    let ctx: AgentContext | null;
+    try {
+      ctx = deps.authenticate()(provided);
+    } catch (error) {
+      // The policy DB could not answer (busy past its timeout, I/O). Neither
+      // "unauthorized" nor a stack trace: say what happened.
+      console.error(`[auth] policy lookup failed: ${errorMessage(error)}`);
+      res.status(503).json({ error: "policy unavailable" });
+      return;
+    }
     if (!ctx) {
       const source = req.socket.remoteAddress ?? "";
       console.warn(`[auth] rejected request from ${source || "unknown"}`);
@@ -218,5 +237,19 @@ export function createMcpApp(deps: GatewayDeps): express.Express {
     });
   });
 
+  // Whatever a handler did not catch — the SDK transport failing, say.
+  app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error(`[mcp] unhandled error: ${errorMessage(error)}`);
+    if (res.headersSent) return;
+    res.status(500).json({
+      jsonrpc: "2.0",
+      error: { code: -32603, message: "Internal error" },
+      id: null,
+    });
+  });
+
   return app;
 }
+
+const isAbort = (error: unknown) =>
+  error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");

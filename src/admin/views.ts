@@ -17,7 +17,7 @@ const notes = (items: string[], kind: "note" | "error") =>
 /** The audit page's decision filter, in display order. */
 export const AUDIT_DECISIONS: readonly string[] = ["allow", "mutate", "deny", "error"];
 
-type LoginState = "starting" | "unconfigured" | "locked" | "form";
+type LoginState = "starting" | "unconfigured" | "locked" | "form" | "misconfigured";
 
 function loginBody(state: LoginState, error?: string): Safe {
   switch (state) {
@@ -25,6 +25,8 @@ function loginBody(state: LoginState, error?: string): Safe {
       return html`<div class="note">Starting — the service is still reading its configuration. Try again in a moment.</div>`;
     case "unconfigured":
       return html`<div class="note">Dashboard login is not configured. Store the output of <code>npm run hash-password</code> as <code>DASHBOARD_ADMIN_PASSWORD_HASH</code> in the vault and restart.</div>`;
+    case "misconfigured":
+      return html`<div class="error">The stored <code>DASHBOARD_ADMIN_PASSWORD_HASH</code> is not a usable scrypt hash, so no password can match it. Replace it with the exact output of <code>npm run hash-password</code> and restart.</div>`;
     case "locked":
       return html`<div class="error">Too many failed logins. Locked for 15 minutes. Every tunnel connection shares one source address, so this lock applies to everyone; restarting the container clears it.</div>`;
     case "form":
@@ -113,6 +115,9 @@ export function agentsPage(p: {
   return layout(
     "Agents",
     html`${notes(p.flash, "note")}${notes(p.warnings, "error")}
+    ${p.agents.length === 1
+      ? html`<div class="note">Only the <code>default</code> agent exists. It is what the existing Open WebUI connection's bearer maps to. Create an agent per connection, mint it a token, and use that token as the connection's Bearer key.</div>`
+      : ""}
     <section><h1>Agents</h1><div class="wrap"><table>
       <thead><tr><th>Agent</th><th>Tools</th><th>Active credentials</th><th>Folder scope</th></tr></thead>
       <tbody>${rows}</tbody></table></div></section>
@@ -173,7 +178,7 @@ export function agentPage(p: {
     : html`<section><h2>Folder scope ${scopeBadge({ scoped: a.scoped, scopes: p.scopes })}</h2>
       ${a.scoped
         ? html`<div class="wrap"><table><tbody>${scopes}</tbody></table></div>
-          <form method="post" action="/agents/${a.slug}/scopes" class="row" style="margin-top:12px">${csrfField(p.csrf)}
+          <form method="post" action="/agents/${a.slug}/scopes" class="row spaced">${csrfField(p.csrf)}
             <input type="text" name="folder" placeholder="Folder ID or Drive folder URL" required aria-label="Folder" size="48">
             <label><input type="checkbox" name="primary" value="1"> primary (creates land here)</label>
             <button type="submit">Add folder</button>
@@ -201,7 +206,7 @@ export function agentPage(p: {
     <section><h2>Tokens</h2>
       ${isDefault ? html`<p class="muted">The legacy bearer (vault <code>GWORKSPACE_MCP_TOKEN</code>) always maps here and is rotated in the vault, not here.</p>` : ""}
       <div class="wrap"><table><thead><tr><th>Prefix</th><th>Label</th><th>Created</th><th></th></tr></thead><tbody>${tokens}</tbody></table></div>
-      <form method="post" action="/agents/${a.slug}/tokens" class="row" style="margin-top:12px">${csrfField(p.csrf)}
+      <form method="post" action="/agents/${a.slug}/tokens" class="row spaced">${csrfField(p.csrf)}
         <input type="text" name="label" placeholder="Label (e.g. Open WebUI chat-main)" maxlength="80" aria-label="Label">
         <button type="submit">Mint token</button></form></section>
     ${isDefault || a.archivedAt !== null ? "" : html`<section><h2>Archive</h2>
@@ -216,6 +221,7 @@ export function browsePage(p: {
   slug: string;
   parent: string;
   folders: Array<{ id: string; name: string }>;
+  more?: boolean;
   csrf: string;
 }): string {
   const rows = p.folders.map(
@@ -226,7 +232,9 @@ export function browsePage(p: {
     "Browse",
     html`<section><h1>Folders in <code>${p.parent}</code></h1>
       <p><a href="/agents/${p.slug}">← back to ${p.slug}</a> · <a href="/agents/${p.slug}/browse?parent=root">My Drive</a></p>
-      ${p.folders.length ? html`<div class="wrap"><table><tbody>${rows}</tbody></table></div>` : html`<p class="muted">No folders here.</p>`}</section>`,
+      ${p.folders.length ? html`<div class="wrap"><table><tbody>${rows}</tbody></table></div>` : html`<p class="muted">No folders here.</p>`}
+      ${p.more ? html`<p class="note">Only the first 200 folders are shown. Paste the folder's ID or URL on the agent page to add one not listed.</p>` : ""}
+      <p class="muted">Shared drives and folders shared with this account are not browsable here; paste their URL on the agent page.</p></section>`,
     { nav: true, csrf: p.csrf },
   );
 }

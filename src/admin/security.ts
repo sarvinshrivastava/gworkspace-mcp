@@ -88,9 +88,25 @@ export function isAllowed(address: string | undefined, allowed: Set<string>): bo
   return Boolean(address) && allowed.has(address!);
 }
 
+/**
+ * The Host header must name loopback (or an explicitly configured name).
+ *
+ * The socket allowlist cannot tell the admin's browser from a DNS-rebinding
+ * page open in that same browser while the tunnel is up — both arrive through
+ * the tunnel. The session cookie stops such a page acting as the admin, but
+ * not from spending the shared login lockout. Its Host header is the attacker's
+ * domain, so checking it closes that.
+ */
+export function isAllowedHost(hostHeader: string | undefined, extra: string[] = []): boolean {
+  if (!hostHeader) return false;
+  const host = hostHeader.toLowerCase().replace(/:\d+$/, "");
+  return ["localhost", "127.0.0.1", "[::1]", ...extra.map((h) => h.toLowerCase())].includes(host);
+}
+
 // --- the password ----------------------------------------------------------
 
 const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 32 } as const;
+const SCRYPT_MAXMEM = 64 * 1024 * 1024;
 
 /** scrypt$N$r$p$<salt b64>$<key b64> — what `npm run hash-password` prints. */
 export function hashPassword(password: string): string {
@@ -105,22 +121,39 @@ export async function verifyPassword(password: string, encoded: string): Promise
   const m = HASH_RE.exec(encoded);
   if (!m) return false;
   const [N, r, p] = [Number(m[1]), Number(m[2]), Number(m[3])];
-  // Refuse parameters that would make one login attempt a memory bomb.
-  if (N > 1 << 17 || r > 16 || p > 4) return false;
+  // Refuse parameters scrypt would reject, or that would make one login
+  // attempt a memory bomb: N a power of two, and 128·N·r within maxmem.
+  if (N < 2 || (N & (N - 1)) !== 0 || r < 1 || p < 1 || p > 4) return false;
+  if (128 * N * r > SCRYPT_MAXMEM / 2) return false;
   const salt = Buffer.from(m[4]!, "base64");
   const expected = Buffer.from(m[5]!, "base64");
   if (!expected.length) return false;
-  const key = await new Promise<Buffer>((resolve, reject) =>
-    crypto.scrypt(password, salt, expected.length, { N, r, p, maxmem: 64 * 1024 * 1024 }, (err, k) =>
-      err ? reject(err) : resolve(k),
-    ),
-  );
-  return crypto.timingSafeEqual(key, expected);
+  try {
+    const key = await new Promise<Buffer>((resolve, reject) =>
+      crypto.scrypt(password, salt, expected.length, { N, r, p, maxmem: SCRYPT_MAXMEM }, (err, k) =>
+        err ? reject(err) : resolve(k),
+      ),
+    );
+    return crypto.timingSafeEqual(key, expected);
+  } catch {
+    return false;
+  }
+}
+
+
+/** Whether a stored hash can ever verify: the login page says so if not. */
+export function usableHash(encoded: string): boolean {
+  const m = HASH_RE.exec(encoded);
+  if (!m) return false;
+  const [N, r] = [Number(m[1]), Number(m[2])];
+  return N >= 2 && (N & (N - 1)) === 0 && r >= 1 && 128 * N * r <= SCRYPT_MAXMEM / 2;
 }
 
 export { safeEqual } from "../policy/tokens.js";
 
 // --- the lockout -----------------------------------------------------------
+
+const WINDOW_MS = 15 * 60_000;
 
 /**
  * Five failures lock a source for fifteen minutes, checked before scrypt runs.
@@ -128,7 +161,7 @@ export { safeEqual } from "../policy/tokens.js";
  * in practice this is one lock for everyone on the host; a restart clears it.
  */
 export class LoginLimiter {
-  private failures = new Map<string, { count: number; lockedUntil: number }>();
+  private failures = new Map<string, { count: number; first: number; lockedUntil: number }>();
   private inFlight = false;
 
   constructor(private readonly now: () => number = Date.now) {}
@@ -138,12 +171,22 @@ export class LoginLimiter {
     return Boolean(entry && entry.lockedUntil > this.now());
   }
 
-  fail(source: string): void {
-    const entry = this.failures.get(source) ?? { count: 0, lockedUntil: 0 };
-    if (entry.lockedUntil && entry.lockedUntil <= this.now()) entry.count = 0;
+  /** Returns true when this failure starts a lock. */
+  fail(source: string): boolean {
+    const at = this.now();
+    const entry = this.failures.get(source) ?? { count: 0, first: at, lockedUntil: 0 };
+    // Five failures within one window, not five in the lifetime of the
+    // process: a typo today and four last month are not an attack.
+    if ((entry.lockedUntil && entry.lockedUntil <= at) || at - entry.first > WINDOW_MS) {
+      entry.count = 0;
+      entry.first = at;
+      entry.lockedUntil = 0;
+    }
     entry.count++;
-    if (entry.count >= 5) entry.lockedUntil = this.now() + 15 * 60_000;
+    const locks = entry.count >= 5 && !entry.lockedUntil;
+    if (entry.count >= 5) entry.lockedUntil = at + WINDOW_MS;
     this.failures.set(source, entry);
+    return locks;
   }
 
   success(source: string): void {

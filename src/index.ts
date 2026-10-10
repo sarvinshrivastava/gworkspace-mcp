@@ -66,7 +66,7 @@ function openStore(): void {
     if (error instanceof OpenError && !error.existed) {
       dbError = error.message;
       console.error(
-        `[db] DEGRADED: cannot create the policy database at ${config.dbPath} (${error.message}). The legacy bearer is served with today's 20 tools; minted tokens are refused; the dashboard is read-only. Mount a writable volume at ${config.dbPath.replace(/\/[^/]+$/, "")}.`,
+        `[db] DEGRADED: cannot create the policy database at ${config.dbPath} (${errorMessage(error)}). Only the legacy bearer is served, with the first-boot tool set; minted tokens are refused; the dashboard is unavailable. Mount a writable volume at ${config.dbPath.replace(/\/[^/]+$/, "")}.`,
       );
       return;
     }
@@ -77,7 +77,7 @@ function openStore(): void {
   }
 
   if (store.ensureDefaultAgent(DEFAULT_GRANTS)) {
-    console.log("[db] created the default agent for the legacy bearer, with today's 20 tools");
+    console.log("[db] created the default agent for the legacy bearer, with every mapped tool");
   }
   audit = new Audit(store);
 
@@ -123,6 +123,7 @@ async function main() {
     exposedOrder: () => upstreamState.exposedTools.map((t) => t.name),
     withheld: () => upstreamState.withheld,
     allowed: makeAllowedSources(config.adminAllowedSources),
+    allowedHosts: config.adminAllowedHosts,
   });
 
   await Promise.all([

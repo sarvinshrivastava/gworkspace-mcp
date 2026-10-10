@@ -33,6 +33,9 @@ export const config = {
   /** Extra exact source addresses allowed on the admin port, comma-separated. */
   adminAllowedSources: envList("ADMIN_ALLOWED_SOURCES"),
 
+  /** Extra Host header names the admin port answers to (default: loopback only). */
+  adminAllowedHosts: envList("ADMIN_ALLOWED_HOSTS"),
+
   /** The pinned upstream server's entry point, inside this image. */
   upstreamEntry: env(
     "UPSTREAM_ENTRY",

@@ -57,13 +57,18 @@ export class Audit {
     this.write({ kind: "auth", agent: null, tool: null, decision: "deny", reason, resources: [], source });
   }
 
-  admin(action: string, resources: string[], source: string): void {
-    this.write({ kind: "admin", agent: null, tool: null, decision: "mutate", reason: action, resources, source });
+  /** A dashboard change, filed under the agent it touched so the agent filter finds it. */
+  admin(action: string, agent: string | null, resources: string[], source: string): void {
+    this.write({ kind: "admin", agent, tool: null, decision: "mutate", reason: action, resources, source });
   }
 
-  /** A refused dashboard request: a failed login or a missing CSRF token. */
+  /**
+   * A refused dashboard request: a failed login, a lockout, a missing CSRF
+   * token. Never deduplicated — the lockout already caps how many there can
+   * be, and a password-guessing burst is exactly what this log is for.
+   */
   adminDeny(reason: string, source: string): void {
-    this.authFailure(source, reason);
+    this.write({ kind: "auth", agent: null, tool: null, decision: "deny", reason, resources: [], source });
   }
 
   prune(retentionDays = 90): void {

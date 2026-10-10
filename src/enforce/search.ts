@@ -57,7 +57,9 @@ const anyParent = (ids: string[]) => ids.map((id) => `'${escapeQ(id)}' in parent
  * calls rather than one call per folder.
  */
 export class SubtreeCache {
-  private cache = new Map<string, { folders: string[]; at: number }>();
+  /** `folders: null` remembers ScopeTooLarge, so an oversized scope is not re-walked on every call. */
+  private cache = new Map<string, { folders: string[] | null; at: number }>();
+  private static readonly MAX_ENTRIES = 200;
   private readonly ttlMs: number;
   private readonly cap: number;
   private readonly now: () => number;
@@ -78,7 +80,11 @@ export class SubtreeCache {
   async folders(roots: string[], signal: AbortSignal): Promise<string[]> {
     const key = [...roots].sort().join(",");
     const hit = this.cache.get(key);
-    if (hit && this.now() - hit.at < this.ttlMs) return hit.folders;
+    if (hit && this.now() - hit.at < this.ttlMs) {
+      if (!hit.folders) throw new ScopeTooLarge(`more than ${this.cap} folders in scope`);
+      return hit.folders;
+    }
+    this.cache.delete(key);
 
     const drive = this.drive();
     if (!drive) throw new Error("Drive client not ready");
@@ -103,6 +109,7 @@ export class SubtreeCache {
             seen.add(id);
             next.push(id);
             if (seen.size > this.cap) {
+              this.remember(key, null);
               throw new ScopeTooLarge(`more than ${this.cap} folders in scope`);
             }
           }
@@ -113,8 +120,17 @@ export class SubtreeCache {
     }
 
     const folders = [...seen];
-    this.cache.set(key, { folders, at: this.now() });
+    this.remember(key, folders);
     return folders;
+  }
+
+  /** Bounded: every distinct folderId an agent searches is its own key. */
+  private remember(key: string, folders: string[] | null): void {
+    this.cache.delete(key);
+    this.cache.set(key, { folders, at: this.now() });
+    while (this.cache.size > SubtreeCache.MAX_ENTRIES) {
+      this.cache.delete(this.cache.keys().next().value as string);
+    }
   }
 }
 
@@ -139,7 +155,8 @@ export function buildConditions(args: SearchArgs): string[] {
     const resolved = MIME_TYPE_SHORTCUTS[args.mimeType] ?? args.mimeType;
     conditions.push(`mimeType='${escapeQ(resolved)}'`);
   }
-  if (args.modifiedAfter !== undefined) {
+  // Truthiness, as the upstream: "" means no filter, not an invalid date.
+  if (args.modifiedAfter) {
     // Throws RangeError("Invalid time value") exactly where the upstream would.
     const cutoff = new Date(args.modifiedAfter).toISOString();
     conditions.push(`modifiedTime > '${escapeQ(cutoff)}'`);

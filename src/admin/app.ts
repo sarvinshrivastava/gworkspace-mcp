@@ -30,7 +30,9 @@ import {
   LoginLimiter,
   SessionStore,
   isAllowed,
+  isAllowedHost,
   safeEqual,
+  usableHash,
   verifyPassword,
   type Session,
 } from "./security.js";
@@ -60,6 +62,8 @@ export type AdminDeps = {
   exposedOrder: () => string[];
   withheld: () => { scoped: ReadonlySet<string>; all: ReadonlySet<string> };
   allowed: () => Set<string>;
+  /** Extra Host names, beyond loopback. */
+  allowedHosts?: string[];
   sessions?: SessionStore;
   limiter?: LoginLimiter;
 };
@@ -111,6 +115,15 @@ export function createAdminApp(deps: AdminDeps): express.Express {
     next();
   });
 
+  // 1b. And only under a loopback name: see isAllowedHost.
+  app.use((req, res, next) => {
+    if (!isAllowedHost(req.headers.host, deps.allowedHosts ?? [])) {
+      res.status(403).type("text/plain").send("forbidden host");
+      return;
+    }
+    next();
+  });
+
   // 2. Headers. No script may run on these pages, from anywhere.
   app.use((_req, res, next) => {
     res.set({
@@ -139,6 +152,9 @@ export function createAdminApp(deps: AdminDeps): express.Express {
     const hash = deps.passwordHash();
     if (hash === null) return "starting" as const;
     if (!hash) return "unconfigured" as const;
+    // Malformed, or parameters scrypt rejects: every login would fail and spend
+    // the shared lockout. Say so instead.
+    if (!usableHash(hash)) return "misconfigured" as const;
     if (limiter.locked(source(req))) return "locked" as const;
     return "form" as const;
   };
@@ -162,13 +178,13 @@ export function createAdminApp(deps: AdminDeps): express.Express {
       limiter.release();
     }
     if (!ok) {
-      limiter.fail(source(req));
       deps.audit()?.adminDeny("login", source(req));
+      if (limiter.fail(source(req))) deps.audit()?.adminDeny("login_lockout", source(req));
       return page(res, 401, loginPage(limiter.locked(source(req)) ? "locked" : "form", "Wrong password."));
     }
     limiter.success(source(req));
     const session = sessions.create();
-    deps.audit()?.admin("login", [], source(req));
+    deps.audit()?.admin("login", null, [], source(req));
     res.setHeader(
       "Set-Cookie",
       `${COOKIE}=${session.id}; HttpOnly; SameSite=Strict; Path=/${req.secure ? "; Secure" : ""}`,
@@ -200,8 +216,16 @@ export function createAdminApp(deps: AdminDeps): express.Express {
     store: res.locals.store as PolicyStore,
   });
 
-  const done = (req: express.Request, res: express.Response, action: string, resources: string[], to: string) => {
-    deps.audit()?.admin(action, resources, source(req));
+  /** Audits a dashboard change against the agent it touched, then redirects. */
+  const done = (
+    req: express.Request,
+    res: express.Response,
+    action: string,
+    resources: string[],
+    to: string,
+    agent: string | null = typeof req.params.slug === "string" ? req.params.slug : null,
+  ) => {
+    deps.audit()?.admin(action, agent, resources, source(req));
     res.redirect(303, to);
   };
 
@@ -228,10 +252,20 @@ export function createAdminApp(deps: AdminDeps): express.Express {
     return agent;
   };
 
+  /** For changes: an archived agent is a record, not something to edit. */
+  const requireLiveAgent = (req: express.Request, res: express.Response) => {
+    const agent = requireAgent(req, res);
+    if (agent && agent.archivedAt !== null) {
+      page(res, 409, errorPage(409, "This agent is archived and can no longer be changed."));
+      return null;
+    }
+    return agent;
+  };
+
   app.post("/logout", (req, res) => {
     sessions.destroy(ctx(res).session.id);
     res.setHeader("Set-Cookie", `${COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
-    deps.audit()?.admin("logout", [], source(req));
+    deps.audit()?.admin("logout", null, [], source(req));
     res.redirect(303, "/login");
   });
 
@@ -293,7 +327,7 @@ export function createAdminApp(deps: AdminDeps): express.Express {
   });
 
   app.post("/agents/:slug/grants", (req, res) => {
-    const agent = requireAgent(req, res);
+    const agent = requireLiveAgent(req, res);
     if (!agent) return;
     const values = ([] as unknown[]).concat(req.body?.g ?? []);
     if (!values.every((v): v is string => typeof v === "string" && isGrantKey(v))) {
@@ -308,7 +342,7 @@ export function createAdminApp(deps: AdminDeps): express.Express {
   });
 
   app.post("/agents/:slug/archive", (req, res) => {
-    const agent = requireAgent(req, res);
+    const agent = requireLiveAgent(req, res);
     if (!agent) return;
     const { session, store } = ctx(res);
     if (attempt(session, "agent.archive", () => store.archiveAgent(agent.slug))) {
@@ -318,7 +352,7 @@ export function createAdminApp(deps: AdminDeps): express.Express {
   });
 
   app.post("/agents/:slug/unconfine", (req, res) => {
-    const agent = requireAgent(req, res);
+    const agent = requireLiveAgent(req, res);
     if (!agent) return;
     const { session, store } = ctx(res);
     if (req.body?.confirm !== "yes") {
@@ -332,7 +366,7 @@ export function createAdminApp(deps: AdminDeps): express.Express {
   });
 
   app.post("/agents/:slug/scopes", async (req, res) => {
-    const agent = requireAgent(req, res);
+    const agent = requireLiveAgent(req, res);
     if (!agent) return;
     const { session, store } = ctx(res);
     const back = `/agents/${agent.slug}`;
@@ -369,16 +403,19 @@ export function createAdminApp(deps: AdminDeps): express.Express {
   });
 
   app.post("/agents/:slug/scopes/:folderId/remove", (req, res) => {
-    const agent = requireAgent(req, res);
+    const agent = requireLiveAgent(req, res);
     if (!agent) return;
+    const { session, store } = ctx(res);
     const folderId = String(req.params.folderId);
-    ctx(res).store.removeScope(agent.slug, folderId);
-    deps.subtree.flush();
-    done(req, res, "scope.remove", [agent.slug, folderId], `/agents/${agent.slug}`);
+    if (attempt(session, "scope.remove", () => store.removeScope(agent.slug, folderId))) {
+      deps.subtree.flush();
+      return done(req, res, "scope.remove", [agent.slug, folderId], `/agents/${agent.slug}`);
+    }
+    res.redirect(303, `/agents/${agent.slug}`);
   });
 
   app.post("/agents/:slug/scopes/:folderId/primary", (req, res) => {
-    const agent = requireAgent(req, res);
+    const agent = requireLiveAgent(req, res);
     if (!agent) return;
     const { session, store } = ctx(res);
     const folderId = String(req.params.folderId);
@@ -404,20 +441,17 @@ export function createAdminApp(deps: AdminDeps): express.Express {
         orderBy: "name",
       });
       const folders = listing.files.map((f) => ({ id: String(f.id), name: String(f.name ?? "") }));
-      page(res, 200, browsePage({ slug: agent.slug, parent, folders, csrf: ctx(res).session.csrf }));
+      const more = Boolean(listing.nextPageToken);
+      page(res, 200, browsePage({ slug: agent.slug, parent, folders, more, csrf: ctx(res).session.csrf }));
     } catch (error) {
       page(res, 502, errorPage(502, `Drive did not answer: ${errorMessage(error)}`));
     }
   });
 
   app.post("/agents/:slug/tokens", (req, res) => {
-    const agent = requireAgent(req, res);
+    const agent = requireLiveAgent(req, res);
     if (!agent) return;
     const { session, store } = ctx(res);
-    if (agent.archivedAt !== null) {
-      session.flash.push("Archived agents cannot get new tokens.");
-      return res.redirect(303, `/agents/${agent.slug}`);
-    }
     const token = mintToken();
     const label = typeof req.body?.label === "string" ? req.body.label : "";
     // Stored before it is ever shown: a crash in between loses nothing usable.
@@ -432,7 +466,7 @@ export function createAdminApp(deps: AdminDeps): express.Express {
     const token = Number.isInteger(id) ? store.getToken(id) : null;
     if (!token) return page(res, 404, errorPage(404, "No such token."));
     store.revokeToken(id);
-    done(req, res, "token.revoke", [token.agent, token.prefix], `/agents/${token.agent}`);
+    done(req, res, "token.revoke", [token.agent, token.prefix], `/agents/${token.agent}`, token.agent);
   });
 
   app.get("/audit", (req, res) => {
@@ -455,6 +489,15 @@ export function createAdminApp(deps: AdminDeps): express.Express {
 
   app.use((_req, res) => {
     page(res, 404, errorPage(404, "Not found."));
+  });
+
+  // Anything a route did not handle — a SQLite error, a Drive failure outside
+  // a try. Logged here, and answered with the dashboard's own escaped page
+  // rather than Express's default, which would print a stack trace.
+  app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error(`[admin] unhandled error: ${errorMessage(error)}`);
+    if (res.headersSent) return;
+    page(res, 500, errorPage(500, "Something went wrong. The error is in the service log."));
   });
 
   return app;

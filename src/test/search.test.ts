@@ -195,3 +195,44 @@ test("the subtree is cached and flushable", async () => {
   await subtree.folders(["scope-F-0001"], signal());
   assert.ok(drive.listCalls.length > calls);
 });
+
+test("an empty modifiedAfter is no filter, as upstream", () => {
+  const conditions = buildConditions({
+    query: "x", searchIn: "name", modifiedAfter: "", orderBy: "name", sortDirection: "asc", maxResults: 1,
+  });
+  assert.ok(!conditions.some((c) => c.startsWith("modifiedTime")));
+});
+
+test("an oversized scope is remembered, not re-walked", async () => {
+  const drive = new FakeDrive();
+  drive.folder("scope-F-0001", []);
+  for (let i = 0; i < 12; i++) drive.folder(`child-${i}-xxxxx`, ["scope-F-0001"]);
+  const subtree = new SubtreeCache(() => drive, { cap: 10 });
+  await assert.rejects(subtree.folders(["scope-F-0001"], signal()), ScopeTooLarge);
+  const calls = drive.listCalls.length;
+  await assert.rejects(subtree.folders(["scope-F-0001"], signal()), ScopeTooLarge);
+  assert.equal(drive.listCalls.length, calls);
+});
+
+test("hasMore follows nextPageToken and incompleteSearch; duplicates collapse", async () => {
+  const drive = scopeWithDocs(3);
+  const subtree = new SubtreeCache(() => drive);
+  const original = drive.listFiles.bind(drive);
+  let mode: "token" | "incomplete" | "dup" = "token";
+  drive.listFiles = async (p) => {
+    const page = await original(p);
+    if (!p.q.includes("contains")) return page;
+    if (mode === "token") return { ...page, nextPageToken: "more" };
+    if (mode === "incomplete") return { ...page, incompleteSearch: true } as typeof page;
+    return { files: [...page.files, ...page.files] };
+  };
+  const run = async () =>
+    JSON.parse(await scopedSearchDriveFiles(drive, subtree, ["scope-F-0001"], { query: "report", maxResults: 50 }));
+  assert.equal((await run()).hasMore, true);
+  mode = "incomplete";
+  assert.equal((await run()).hasMore, true);
+  mode = "dup";
+  const deduped = await run();
+  assert.equal(deduped.hasMore, false);
+  assert.equal(deduped.files.length, 3);
+});

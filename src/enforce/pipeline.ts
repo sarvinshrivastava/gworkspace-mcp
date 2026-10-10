@@ -121,9 +121,18 @@ export async function planCall(
     mutated = result.mutated;
   }
 
-  // 2. Calendar is never folder-scoped. 3. Unconfined agents relay as before.
+  // 2. Calendar is never folder-scoped. 3. Unconfined agents relay as before —
+  // still naming the file in the audit, and still making a new folder visible
+  // to confined agents' searches at once.
   if (CALENDAR_TOOLS.has(tool) || !ctx.scoped) {
-    return { kind: "relay", args, mutated, resources: [] };
+    const id = ID_ARG[tool] ? args[ID_ARG[tool]] : undefined;
+    return {
+      kind: "relay",
+      args,
+      mutated,
+      resources: validId(id) ? [id] : [],
+      ...(tool === "createFolder" ? { after: () => deps.subtree.flush() } : {}),
+    };
   }
 
   // 4. Confined with no folder: no Docs, Sheets or Drive at all.
@@ -148,6 +157,8 @@ export async function planCall(
   const checkPrimary = async (live: boolean): Promise<Plan | string> => {
     if (!primary) return deny("no_primary", []);
     const v = await r.check(primary, scopeIds, live);
+    // Drive not answering is "try again", never "your folder is gone".
+    if (!v.ok && v.reason === "drive_error") return deny("drive_error", [primary]);
     if (!v.ok || v.file.mimeType !== FOLDER_MIME) return deny("primary_unavailable", [primary]);
     return primary;
   };

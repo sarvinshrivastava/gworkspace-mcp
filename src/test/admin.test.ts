@@ -1,6 +1,6 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import type { Server } from "node:http";
+import http, { type Server } from "node:http";
 
 import { Audit } from "../audit.js";
 import { createAdminApp, parseFolderInput, type AdminDeps } from "../admin/app.js";
@@ -11,14 +11,16 @@ import {
   firstHosts,
   gatewaysFromRoute,
   hashPassword,
+  isAllowedHost,
   makeAllowedSources,
+  usableHash,
   verifyPassword,
 } from "../admin/security.js";
 import { ScopeResolver } from "../enforce/resolver.js";
 import { SubtreeCache } from "../enforce/search.js";
 import { DEFAULT_GRANTS } from "../policy/derive.js";
 import type { PolicyStore } from "../policy/store.js";
-import { FakeDrive, TODAYS_TOOLS, listen, tempStore } from "./helpers.js";
+import { FakeDrive, TODAYS_TOOLS, listen, quietly, tempStore } from "./helpers.js";
 
 const servers: Server[] = [];
 after(() => servers.forEach((s) => s.close()));
@@ -354,4 +356,127 @@ test("without a database every page explains the error", async () => {
   const reply = await request(url, "/login");
   assert.equal(reply.status, 503);
   assert.match(reply.text, /disk on fire/);
+});
+
+test("verifyPassword never throws on hashes scrypt would reject", async () => {
+  const salt = Buffer.alloc(16).toString("base64");
+  const key = Buffer.alloc(32).toString("base64");
+  for (const params of ["1000$8$1", "131072$16$1", "16384$0$1", "16384$8$9"]) {
+    assert.equal(await verifyPassword(PASSWORD, `scrypt$${params}$${salt}$${key}`), false, params);
+  }
+  assert.equal(usableHash(HASH), true);
+  assert.equal(usableHash(`scrypt$1000$8$1$${salt}$${key}`), false);
+  assert.equal(usableHash("plain"), false);
+});
+
+test("the failure count decays: five failures must fall within 15 minutes", () => {
+  let now = 0;
+  const limiter = new LoginLimiter(() => now);
+  for (let i = 0; i < 4; i++) limiter.fail("a");
+  now += 16 * 60_000;
+  assert.equal(limiter.fail("a"), false);
+  assert.equal(limiter.locked("a"), false);
+  for (let i = 0; i < 3; i++) limiter.fail("a");
+  assert.equal(limiter.fail("a"), true);
+  assert.equal(limiter.locked("a"), true);
+});
+
+test("isAllowedHost: loopback names only, plus configured ones", () => {
+  assert.equal(isAllowedHost("localhost:3015"), true);
+  assert.equal(isAllowedHost("127.0.0.1:3015"), true);
+  assert.equal(isAllowedHost("[::1]:3015"), true);
+  assert.equal(isAllowedHost("evil.example:3015"), false);
+  assert.equal(isAllowedHost(undefined), false);
+  assert.equal(isAllowedHost("admin.internal", ["admin.internal"]), true);
+});
+
+test("a foreign Host header is refused (DNS rebinding)", async () => {
+  const { url } = await boot();
+  // fetch() will not send a custom Host header; a raw request will.
+  const status = (host: string) =>
+    new Promise<number>((resolve, reject) => {
+      const req = http.request(`${url}/login`, { headers: { Host: host } }, (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      });
+      req.on("error", reject);
+      req.end();
+    });
+  assert.equal(await status("attacker.example:3015"), 403);
+  assert.equal(await status("localhost:3015"), 200);
+});
+
+test("a malformed stored hash says so instead of failing every login", async () => {
+  const { url } = await boot({ hash: "scrypt$1000$8$1$AAAA$AAAA" });
+  assert.match((await request(url, "/login")).text, /not a usable scrypt hash/);
+  assert.equal((await request(url, "/login", { form: { password: PASSWORD } })).status, 503);
+});
+
+test("logout ends the session server-side", async () => {
+  const { url } = await boot();
+  const { cookie, csrf } = await login(url);
+  assert.equal((await request(url, "/", { cookie })).status, 200);
+  const out = await request(url, "/logout", { cookie, form: { _csrf: csrf } });
+  assert.equal(out.location, "/login");
+  const after = await request(url, "/", { cookie });
+  assert.equal(after.status, 303);
+  assert.equal(after.location, "/login");
+});
+
+test("failed logins and the lockout are each audited, not deduplicated", async () => {
+  const { url, store } = await boot();
+  for (let i = 0; i < 5; i++) await request(url, "/login", { form: { password: "nope" } });
+  const rows = store.queryAudit({ limit: 50 }).filter((r) => r.kind === "auth");
+  assert.equal(rows.filter((r) => r.reason === "login").length, 5);
+  assert.equal(rows.filter((r) => r.reason === "login_lockout").length, 1);
+});
+
+test("dashboard changes are filed under the agent they touched", async () => {
+  const { url, store } = await boot();
+  const { cookie, csrf } = await login(url);
+  await request(url, "/agents", { cookie, form: { slug: "f1", name: "F", _csrf: csrf } });
+  await request(url, "/agents/f1/grants", { cookie, form: { g: "docs:read", _csrf: csrf } });
+  const rows = store.queryAudit({ agent: "f1", limit: 10 });
+  assert.ok(rows.some((r) => r.kind === "admin" && r.reason === "grants.set"));
+});
+
+test("an archived agent can be viewed but not changed", async () => {
+  const { url, store } = await boot();
+  const { cookie, csrf } = await login(url);
+  await request(url, "/agents", { cookie, form: { slug: "z1", name: "Z", _csrf: csrf } });
+  await request(url, "/agents/z1/archive", { cookie, form: { _csrf: csrf } });
+  assert.equal((await request(url, "/agents/z1", { cookie })).status, 200);
+  assert.equal((await request(url, "/agents/z1/grants", { cookie, form: { g: "docs:read", _csrf: csrf } })).status, 409);
+  assert.equal((await request(url, "/agents/z1/tokens", { cookie, form: { _csrf: csrf } })).status, 409);
+  assert.equal(store.getGrants("z1").length, 0);
+});
+
+test("removing a folder that is not in scope says so", async () => {
+  const { url } = await boot();
+  const { cookie, csrf } = await login(url);
+  await request(url, "/agents", { cookie, form: { slug: "r1", name: "R", _csrf: csrf } });
+  await request(url, "/agents/r1/scopes/not-a-scope-1/remove", { cookie, form: { _csrf: csrf } });
+  assert.match((await request(url, "/agents/r1", { cookie })).text, /Not found/);
+});
+
+test("an unhandled error is the dashboard's own 500 page, not a stack trace", async () => {
+  const { url, store } = await boot();
+  const { cookie, csrf } = await login(url);
+  await request(url, "/agents", { cookie, form: { slug: "e1", name: "E", _csrf: csrf } });
+  store.setGrants = () => {
+    throw new Error("SQLITE_BUSY: database is locked");
+  };
+  const { logs } = await quietly(async () => {
+    const reply = await request(url, "/agents/e1/grants", { cookie, form: { g: "docs:read", _csrf: csrf } });
+    assert.equal(reply.status, 500);
+    assert.match(reply.text, /Something went wrong/);
+    assert.doesNotMatch(reply.text, /SQLITE_BUSY|at .*\.js/);
+  });
+  assert.ok(logs.some((l) => /SQLITE_BUSY/.test(l)));
+});
+
+test("the agents page explains first-run when only default exists", async () => {
+  const { url } = await boot();
+  const { cookie } = await login(url);
+  assert.match((await request(url, "/", { cookie })).text, /Only the <code>default<\/code> agent exists/);
 });
