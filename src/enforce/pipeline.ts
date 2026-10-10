@@ -90,6 +90,8 @@ export function denyMessage(reason: DenyReason, id?: string): string {
       return "quickAddEvent cannot add guests — remove the e-mail address.";
     case "calendar_not_primary":
       return "Denied: events can only be written to this account's own calendar (calendarId \"primary\").";
+    case "event_unverifiable":
+      return "Could not check this event's guests, so its title, description and location were not changed. Try again; changing only its time does not need the check.";
     case "event_has_guests":
       return "Denied: that event has guests, so its title, description and location cannot be changed here. Changing its time is allowed.";
     case "not_enabled":
@@ -128,15 +130,22 @@ export async function planCall(
   // 1b. updateEvent is a PATCH: guests already on the event stay, and new text
   // syncs to their calendars even with sendUpdates "none". So an event with
   // guests keeps its words; only its time may move.
-  if (tool === "updateEvent" && EVENT_CONTENT_FIELDS.some((f) => args[f] !== undefined)) {
+  // No eventId: the upstream's schema rejects it; nothing to look up.
+  if (
+    tool === "updateEvent" &&
+    typeof args.eventId === "string" &&
+    args.eventId &&
+    EVENT_CONTENT_FIELDS.some((f) => args[f] !== undefined)
+  ) {
     const drive = deps.drive();
-    if (!drive) return deny("drive_error", []);
+    if (!drive) return deny("event_unverifiable", []);
     let guests: string[] | null;
     try {
       // null: no such event — the upstream reports that in its own words.
-      guests = await drive.eventGuests("primary", String(args.eventId ?? ""));
+      guests = await drive.eventGuests("primary", args.eventId);
     } catch {
-      return deny("drive_error", []);
+      // Fail closed, transient or not: an unchecked event may have guests.
+      return deny("event_unverifiable", []);
     }
     if (guests?.length) return deny("event_has_guests", []);
   }

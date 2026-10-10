@@ -230,8 +230,12 @@ test("the primary is checked live for creates", async () => {
 
 test("unconfined: createFolder flushes the subtree; reads name their file", async () => {
   const { deps } = setup();
+  await deps.subtree.folders(["scope-F-0001"], AbortSignal.timeout(1000));
   const folder = await planCall(unconfined, "createFolder", { name: "n" }, deps);
-  assert.ok((folder as { after?: () => void }).after);
+  const calls = (deps.drive() as FakeDrive).listCalls.length;
+  (folder as { after: () => void }).after();
+  await deps.subtree.folders(["scope-F-0001"], AbortSignal.timeout(1000));
+  assert.ok((deps.drive() as FakeDrive).listCalls.length > calls, "subtree re-walked");
   const read = await planCall(unconfined, "readDocument", { documentId: "doc-outside1" }, deps);
   assert.deepEqual((read as { resources: string[] }).resources, ["doc-outside1"]);
 });
@@ -258,5 +262,9 @@ test("updateEvent: an event with guests keeps its words; its time may move", asy
   assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { eventId: "just-me", description: "notes" }, deps)), "relay");
   assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { eventId: "missing", summary: "x" }, deps)), "relay");
   drive.eventError = retryable();
-  assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { eventId: "just-me", summary: "x" }, deps)), "drive_error");
+  assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { eventId: "just-me", summary: "x" }, deps)), "event_unverifiable");
+  drive.eventError = new Error("403 forbidden");
+  assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { eventId: "just-me", summary: "x" }, deps)), "event_unverifiable");
+  // No eventId: nothing to look up; the upstream's schema rejects the call.
+  assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { summary: "x" }, deps)), "relay");
 });

@@ -102,8 +102,8 @@ export function isAllowed(address: string | undefined, allowed: Set<string>): bo
  */
 export function isAllowedHost(hostHeader: string | undefined, extra: string[] = []): boolean {
   if (!hostHeader) return false;
-  const host = hostHeader.toLowerCase().replace(/:\d+$/, "");
-  return ["localhost", "127.0.0.1", "[::1]", ...extra.map((h) => h.toLowerCase())].includes(host);
+  const bare = (h: string) => h.trim().toLowerCase().replace(/:\d+$/, "");
+  return ["localhost", "127.0.0.1", "[::1]", ...extra.map(bare)].includes(bare(hostHeader));
 }
 
 // --- the password ----------------------------------------------------------
@@ -123,11 +123,8 @@ export const HASH_RE = /^scrypt\$(\d+)\$(\d+)\$(\d+)\$([A-Za-z0-9+/=]+)\$([A-Za-
 export async function verifyPassword(password: string, encoded: string): Promise<boolean> {
   const m = HASH_RE.exec(encoded);
   if (!m) return false;
+  if (!usableHash(encoded)) return false;
   const [N, r, p] = [Number(m[1]), Number(m[2]), Number(m[3])];
-  // Refuse parameters scrypt would reject, or that would make one login
-  // attempt a memory bomb: N a power of two, and 128·N·r within maxmem.
-  if (N < 2 || (N & (N - 1)) !== 0 || r < 1 || p < 1 || p > 4) return false;
-  if (128 * N * r > SCRYPT_MAXMEM / 2) return false;
   const salt = Buffer.from(m[4]!, "base64");
   const expected = Buffer.from(m[5]!, "base64");
   if (!expected.length) return false;
@@ -148,8 +145,19 @@ export async function verifyPassword(password: string, encoded: string): Promise
 export function usableHash(encoded: string): boolean {
   const m = HASH_RE.exec(encoded);
   if (!m) return false;
-  const [N, r] = [Number(m[1]), Number(m[2])];
-  return N >= 2 && (N & (N - 1)) === 0 && r >= 1 && 128 * N * r <= SCRYPT_MAXMEM / 2;
+  const [N, r, p] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  // Parameters scrypt would reject, or that would make one login attempt a
+  // memory bomb: N a power of two, r and p small, and the whole working set
+  // (128·r·(N+p+2) bytes) well inside maxmem.
+  return (
+    N >= 2 &&
+    (N & (N - 1)) === 0 &&
+    r >= 1 &&
+    r <= 16 &&
+    p >= 1 &&
+    p <= 4 &&
+    128 * r * (N + p + 2) <= SCRYPT_MAXMEM / 2
+  );
 }
 
 export { safeEqual } from "../policy/tokens.js";
@@ -164,7 +172,8 @@ const WINDOW_MS = 15 * 60_000;
  * in practice this is one lock for everyone on the host; a restart clears it.
  */
 export class LoginLimiter {
-  private failures = new Map<string, { count: number; first: number; lockedUntil: number }>();
+  /** Per source: the times of recent failures, and when a lock ends. */
+  private failures = new Map<string, { times: number[]; lockedUntil: number }>();
   private inFlight = false;
 
   constructor(private readonly now: () => number = Date.now) {}
@@ -177,17 +186,16 @@ export class LoginLimiter {
   /** Returns true when this failure starts a lock. */
   fail(source: string): boolean {
     const at = this.now();
-    const entry = this.failures.get(source) ?? { count: 0, first: at, lockedUntil: 0 };
-    // Five failures within one window, not five in the lifetime of the
-    // process: a typo today and four last month are not an attack.
-    if ((entry.lockedUntil && entry.lockedUntil <= at) || at - entry.first > WINDOW_MS) {
-      entry.count = 0;
-      entry.first = at;
+    const entry = this.failures.get(source) ?? { times: [], lockedUntil: 0 };
+    if (entry.lockedUntil && entry.lockedUntil <= at) {
+      entry.times = [];
       entry.lockedUntil = 0;
     }
-    entry.count++;
-    const locks = entry.count >= 5 && !entry.lockedUntil;
-    if (entry.count >= 5) entry.lockedUntil = at + WINDOW_MS;
+    // Five failures in any 15-minute span (sliding, so a burst straddling a
+    // window edge still counts), not five in the lifetime of the process.
+    entry.times = [...entry.times.filter((t) => at - t < WINDOW_MS), at];
+    const locks = entry.times.length >= 5 && !entry.lockedUntil;
+    if (locks) entry.lockedUntil = at + WINDOW_MS;
     this.failures.set(source, entry);
     return locks;
   }

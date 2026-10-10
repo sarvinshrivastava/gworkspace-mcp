@@ -31,6 +31,7 @@ export type DenyReason =
   | "quickadd_guest"
   | "calendar_not_primary"
   | "event_has_guests"
+  | "event_unverifiable"
   | "not_enabled"
   | "unmapped";
 

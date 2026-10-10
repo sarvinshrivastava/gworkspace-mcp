@@ -238,9 +238,19 @@ export function createMcpApp(deps: GatewayDeps): express.Express {
   });
 
   // Whatever a handler did not catch — the SDK transport failing, say.
-  app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (res.headersSent) return next(error);
+    // A body the JSON parser refused is the client's error, in JSON-RPC terms.
+    const status = (error as { status?: unknown }).status;
+    if (typeof status === "number" && status >= 400 && status < 500) {
+      res.status(status).json({
+        jsonrpc: "2.0",
+        error: { code: status === 400 ? -32700 : -32600, message: status === 400 ? "Parse error" : "Invalid request" },
+        id: null,
+      });
+      return;
+    }
     console.error(`[mcp] unhandled error: ${errorMessage(error)}`);
-    if (res.headersSent) return;
     res.status(500).json({
       jsonrpc: "2.0",
       error: { code: -32603, message: "Internal error" },

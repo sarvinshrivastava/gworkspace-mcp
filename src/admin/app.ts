@@ -281,7 +281,8 @@ export function createAdminApp(deps: AdminDeps): express.Express {
       agents.map((a) => ({ slug: a.slug, tools: a.tools, credentialed: a.slug === DEFAULT_AGENT || a.activeTokens > 0 })),
     );
     const flash = session.flash.splice(0);
-    page(res, 200, agentsPage({ agents, warnings, flash, csrf: session.csrf }));
+    const anyArchived = store.listAgents(true).length > agents.length;
+    page(res, 200, agentsPage({ agents, warnings, flash, csrf: session.csrf, anyArchived }));
   });
 
   app.post("/agents", (req, res) => {
@@ -289,7 +290,7 @@ export function createAdminApp(deps: AdminDeps): express.Express {
     const slug = String(req.body?.slug ?? "").trim();
     const name = String(req.body?.name ?? "");
     if (attempt(session, "agent.create", () => store.createAgent(slug, name))) {
-      return done(req, res, "agent.create", [slug], `/agents/${slug}`);
+      return done(req, res, "agent.create", [slug], `/agents/${slug}`, slug);
     }
     res.redirect(303, "/");
   });
@@ -494,9 +495,14 @@ export function createAdminApp(deps: AdminDeps): express.Express {
   // Anything a route did not handle — a SQLite error, a Drive failure outside
   // a try. Logged here, and answered with the dashboard's own escaped page
   // rather than Express's default, which would print a stack trace.
-  app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (res.headersSent) return next(error);
+    // Body-parser's own client errors (413 too large, 400 malformed) stay 4xx.
+    const status = (error as { status?: unknown }).status;
+    if (typeof status === "number" && status >= 400 && status < 500) {
+      return page(res, status, errorPage(status, "That request could not be read."));
+    }
     console.error(`[admin] unhandled error: ${errorMessage(error)}`);
-    if (res.headersSent) return;
     page(res, 500, errorPage(500, "Something went wrong. The error is in the service log."));
   });
 

@@ -236,3 +236,15 @@ test("hasMore follows nextPageToken and incompleteSearch; duplicates collapse", 
   assert.equal(deduped.hasMore, false);
   assert.equal(deduped.files.length, 3);
 });
+
+test("the subtree cache keeps at most 200 entries", async () => {
+  const drive = new FakeDrive();
+  for (let i = 0; i < 201; i++) drive.folder(`root-${String(i).padStart(4, "0")}-xxx`, []);
+  const subtree = new SubtreeCache(() => drive);
+  for (let i = 0; i < 201; i++) await subtree.folders([`root-${String(i).padStart(4, "0")}-xxx`], signal());
+  const calls = drive.listCalls.length;
+  await subtree.folders(["root-0200-xxx"], signal());
+  assert.equal(drive.listCalls.length, calls, "recent entry still cached");
+  await subtree.folders(["root-0000-xxx"], signal());
+  assert.ok(drive.listCalls.length > calls, "oldest entry was evicted");
+});

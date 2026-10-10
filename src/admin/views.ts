@@ -103,6 +103,8 @@ export function agentsPage(p: {
   warnings: string[];
   flash: string[];
   csrf: string;
+  /** Archived agents exist (they are not listed): the first-run note would be wrong. */
+  anyArchived?: boolean;
 }): string {
   const rows = p.agents.map(
     (a) => html`<tr>
@@ -115,7 +117,7 @@ export function agentsPage(p: {
   return layout(
     "Agents",
     html`${notes(p.flash, "note")}${notes(p.warnings, "error")}
-    ${p.agents.length === 1
+    ${p.agents.length === 1 && !p.anyArchived
       ? html`<div class="note">Only the <code>default</code> agent exists. It is what the existing Open WebUI connection's bearer maps to. Create an agent per connection, mint it a token, and use that token as the connection's Bearer key.</div>`
       : ""}
     <section><h1>Agents</h1><div class="wrap"><table>

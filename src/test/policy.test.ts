@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
@@ -285,6 +285,8 @@ test("backupDaily writes one file per weekday and overwrites a week later", asyn
   const monday = new Date(Date.UTC(2026, 9, 5));
   const first = (await backupDaily(store, dir, monday))!;
   assert.equal(path.basename(first), "policy-1.sqlite");
+  // The skip-if-written-today check reads the real mtime; pin it to "monday".
+  utimesSync(first, monday, monday);
   store.createAgent("later", "Later");
   const again = (await backupDaily(store, dir, new Date(Date.UTC(2026, 9, 12))))!;
   assert.equal(again, first);
@@ -313,4 +315,18 @@ test("removing the primary promotes the oldest remaining folder", () => {
   store.removeScope("a1", "folder-three-xx");
   assert.deepEqual(store.getScopes("a1").filter((s) => s.isPrimary).map((s) => s.folderId), ["folder-one-xxxx"]);
   assert.throws(() => store.removeScope("a1", "missing-folder"), code("not_found"));
+});
+
+test("a failed backup leaves the previous copy and no temp file", async () => {
+  const store = tempStore();
+  const dir = path.join(tempDir(), "backups");
+  const old = new Date(Date.UTC(2026, 0, 1));
+  const target = (await backupDaily(store, dir, old))!;
+  utimesSync(target, old, old);
+  const before = readFileSync(target);
+  store.close();
+  await assert.rejects(backupDaily(store, dir, new Date(Date.UTC(2026, 0, 8))));
+  assert.deepEqual(readFileSync(target), before);
+  assert.equal(statSync(target).mtime.getTime(), old.getTime());
+  assert.ok(!existsSync(`${target}.tmp`));
 });

@@ -368,6 +368,8 @@ test("verifyPassword never throws on hashes scrypt would reject", async () => {
   }
   assert.equal(usableHash(HASH), true);
   assert.equal(usableHash(`scrypt$1000$8$1$${salt}$${key}`), false);
+  assert.equal(usableHash(`scrypt$16384$8$9$${salt}$${key}`), false);
+  assert.equal(usableHash(`scrypt$2$131072$4$${salt}$${key}`), false);
   assert.equal(usableHash("plain"), false);
 });
 
@@ -390,6 +392,7 @@ test("isAllowedHost: loopback names only, plus configured ones", () => {
   assert.equal(isAllowedHost("evil.example:3015"), false);
   assert.equal(isAllowedHost(undefined), false);
   assert.equal(isAllowedHost("admin.internal", ["admin.internal"]), true);
+  assert.equal(isAllowedHost("admin.internal:3015", ["Admin.Internal:443"]), true);
 });
 
 test("a foreign Host header is refused (DNS rebinding)", async () => {
@@ -440,6 +443,7 @@ test("dashboard changes are filed under the agent they touched", async () => {
   await request(url, "/agents/f1/grants", { cookie, form: { g: "docs:read", _csrf: csrf } });
   const rows = store.queryAudit({ agent: "f1", limit: 10 });
   assert.ok(rows.some((r) => r.kind === "admin" && r.reason === "grants.set"));
+  assert.ok(rows.some((r) => r.kind === "admin" && r.reason === "agent.create"));
 });
 
 test("an archived agent can be viewed but not changed", async () => {
@@ -448,8 +452,20 @@ test("an archived agent can be viewed but not changed", async () => {
   await request(url, "/agents", { cookie, form: { slug: "z1", name: "Z", _csrf: csrf } });
   await request(url, "/agents/z1/archive", { cookie, form: { _csrf: csrf } });
   assert.equal((await request(url, "/agents/z1", { cookie })).status, 200);
-  assert.equal((await request(url, "/agents/z1/grants", { cookie, form: { g: "docs:read", _csrf: csrf } })).status, 409);
-  assert.equal((await request(url, "/agents/z1/tokens", { cookie, form: { _csrf: csrf } })).status, 409);
+  for (const route of [
+    "/agents/z1/grants",
+    "/agents/z1/tokens",
+    "/agents/z1/archive",
+    "/agents/z1/unconfine",
+    "/agents/z1/scopes",
+    "/agents/z1/scopes/scope-F-0001/remove",
+    "/agents/z1/scopes/scope-F-0001/primary",
+  ]) {
+    const reply = await request(url, route, { cookie, form: { g: "docs:read", folder: "scope-F-0001", confirm: "yes", _csrf: csrf } });
+    assert.equal(reply.status, 409, route);
+  }
+  assert.equal(store.getScopes("z1").length, 0);
+  assert.equal(store.listTokens("z1").length, 0);
   assert.equal(store.getGrants("z1").length, 0);
 });
 
@@ -481,4 +497,30 @@ test("the agents page explains first-run when only default exists", async () => 
   const { url } = await boot();
   const { cookie } = await login(url);
   assert.match((await request(url, "/", { cookie })).text, /Only the <code>default<\/code> agent exists/);
+});
+
+test("the lockout window slides: a burst across a window edge still locks", () => {
+  let now = 0;
+  const limiter = new LoginLimiter(() => now);
+  now = 10 * 60_000;
+  for (let i = 0; i < 4; i++) limiter.fail("a");
+  now = 16 * 60_000;
+  assert.equal(limiter.fail("a"), true);
+  assert.equal(limiter.locked("a"), true);
+});
+
+test("an oversized form is 413 on the dashboard's own page", async () => {
+  const { url } = await boot();
+  const { cookie, csrf } = await login(url);
+  const reply = await request(url, "/agents", { cookie, form: { slug: "big", name: "x".repeat(70_000), _csrf: csrf } });
+  assert.equal(reply.status, 413);
+  assert.match(reply.text, /could not be read/);
+});
+
+test("the first-run note is not shown when archived agents exist", async () => {
+  const { url } = await boot();
+  const { cookie, csrf } = await login(url);
+  await request(url, "/agents", { cookie, form: { slug: "gone", name: "G", _csrf: csrf } });
+  await request(url, "/agents/gone/archive", { cookie, form: { _csrf: csrf } });
+  assert.doesNotMatch((await request(url, "/", { cookie })).text, /Only the <code>default<\/code> agent exists/);
 });

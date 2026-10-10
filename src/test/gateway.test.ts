@@ -276,3 +276,27 @@ test("the legacy agent's audit names the file it touched", async () => {
   await callTool(url, "legacy-token", "readDocument", { documentId: "doc-outside1" });
   assert.deepEqual(store.queryAudit({ agent: "default", limit: 1 })[0]!.resources, ["doc-outside1"]);
 });
+
+test("a malformed JSON body is a JSON-RPC parse error, not a 500", async () => {
+  const { url } = await boot();
+  const res = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: "Bearer legacy-token" },
+    body: "{not json",
+  });
+  assert.equal(res.status, 400);
+  const body = (await res.json()) as { error: { code: number } };
+  assert.equal(body.error.code, -32700);
+});
+
+test("an error past the route is a JSON-RPC internal error without a stack", async () => {
+  const { url, deps } = await boot();
+  // The audit peek runs inside the route; a throw there is unhandled by it.
+  deps.audit = () => {
+    throw new Error("boom inside the route");
+  };
+  const { result } = await quietly(() => callTool(url, "legacy-token", "notARealTool", {}));
+  assert.equal(result.status, 500);
+  assert.equal(result.body.error.code, -32603);
+  assert.doesNotMatch(JSON.stringify(result.body), /boom/);
+});
