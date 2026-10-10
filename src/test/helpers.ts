@@ -1,9 +1,13 @@
 import { mkdtempSync } from "node:fs";
+import type { Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { DriveClient, DriveError, FOLDER_MIME, type DriveFile } from "../drive/client.js";
 import { openPolicyStore, type PolicyStore } from "../policy/store.js";
+import { EXPECTED_KEYS, type UpstreamState, type UpstreamTool } from "../upstream.js";
+import type express from "express";
 
 export function tempDir(prefix = "gws-test-"): string {
   return mkdtempSync(path.join(tmpdir(), prefix));
@@ -162,3 +166,86 @@ export class FakeDrive extends DriveClient {
 
 export const retryable = () => new DriveError(503, true, "Drive HTTP 503");
 export const forbidden = () => new DriveError(403, false, "Drive HTTP 403");
+
+// ---------------------------------------------------------------------------
+// MCP over HTTP: a fake upstream child and a client call that reads the SSE.
+
+
+export class FakeUpstream {
+  calls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
+  /** Tool names whose next result is an isError. */
+  failing = new Set<string>();
+
+  async callTool(p: { name: string; arguments: Record<string, unknown> }): Promise<unknown> {
+    this.calls.push(p);
+    if (this.failing.has(p.name)) {
+      return { content: [{ type: "text", text: "upstream said no" }], isError: true };
+    }
+    return { content: [{ type: "text", text: `ok:${p.name}` }] };
+  }
+}
+
+/** Upstream tools with permissive schemas carrying the measured keys. */
+export function upstreamTools(names: string[] = TODAYS_TOOLS): UpstreamTool[] {
+  return names.map((name) => ({
+    name,
+    description: name,
+    inputSchema: {
+      type: "object",
+      properties: Object.fromEntries(
+        (EXPECTED_KEYS[name]?.keys ?? ["calendarId", "q", "timeMin", "timeMax", "maxResults", "singleEvents"]).map(
+          (k) => [k, {}],
+        ),
+      ),
+    },
+  }));
+}
+
+export function fakeUpstreamState(client: FakeUpstream | null = new FakeUpstream()): UpstreamState {
+  return {
+    client,
+    exposedTools: upstreamTools(),
+    upstreamToolCount: 119,
+    withheld: { scoped: new Set(), all: new Set() },
+  };
+}
+
+export async function listen(app: express.Express): Promise<{ url: string; server: Server }> {
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+  const { port } = server.address() as AddressInfo;
+  return { url: `http://127.0.0.1:${port}`, server };
+}
+
+export type McpReply = { status: number; body: any };
+
+/** One JSON-RPC request; parses either a JSON or an SSE response. */
+export async function mcpCall(url: string, bearer: string | null, body: unknown): Promise<McpReply> {
+  const res = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+      ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  const data = text
+    .split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => line.slice(6));
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(data.length ? data.join("") : text);
+  } catch {
+    parsed = text;
+  }
+  return { status: res.status, body: parsed };
+}
+
+export const listTools = (url: string, bearer: string) =>
+  mcpCall(url, bearer, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+
+export const callTool = (url: string, bearer: string, name: string, args: Record<string, unknown>) =>
+  mcpCall(url, bearer, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: args } });
