@@ -241,6 +241,19 @@ jobs:
           sed -i '/^GWORKSPACE_IMAGE=/d' .env
           echo "GWORKSPACE_IMAGE=$IMAGE_REF" >> .env
 
+          # `up` removes the running container BEFORE it binds the new one's
+          # ports, so a host port someone else holds means an outage, not a
+          # failed deploy. Check first, while the old container still serves.
+          # Keep in step with `ports:` in docker-compose.yml.
+          ADMIN_HOST_PORT=3017
+          if ss -ltnH "sport = :${ADMIN_HOST_PORT}" | grep -q .; then
+            holder=$(docker ps --filter "publish=${ADMIN_HOST_PORT}" --format '{{.Names}}')
+            if [ "$holder" != "gworkspace-mcp" ]; then
+              echo "host port ${ADMIN_HOST_PORT} is already held by: ${holder:-a non-Docker process}. Not touching the running container."
+              exit 1
+            fi
+          fi
+
           export SECRETS_MANAGER_TOKEN="$SM_TOKEN"
           docker compose -f docker-compose.yml pull
           docker compose -f docker-compose.yml up -d --remove-orphans
@@ -292,5 +305,5 @@ jobs:
             echo ""
             echo "Wire it in Open WebUI: Admin → Settings → Integrations → MCP → \`http://gworkspace-mcp:3014/mcp\`, auth Bearer."
             echo ""
-            echo "Admin dashboard: \`ssh -N -L 3015:127.0.0.1:3015 root@<vps>\`, then open http://localhost:3015"
+            echo "Admin dashboard: \`ssh -N -L 3015:127.0.0.1:3017 root@<vps>\`, then open http://localhost:3015"
           } >> "$GITHUB_STEP_SUMMARY"

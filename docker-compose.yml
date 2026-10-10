@@ -14,9 +14,10 @@ services:
     restart: unless-stopped
 
     # MCP (:3014) is not published to the host at all: unlike pages, nothing
-    # here is public. The admin dashboard (:3015) is published on the host's
-    # loopback only, for an SSH tunnel:
-    #   ssh -N -L 3015:127.0.0.1:3015 root@<vps>   then   http://localhost:3015
+    # here is public. The admin dashboard (:3015 in the container) is published
+    # on the host's loopback only, as :3017 — host :3015 belongs to reel-drop —
+    # for an SSH tunnel:
+    #   ssh -N -L 3015:127.0.0.1:3017 root@<vps>   then   http://localhost:3015
     # Other containers on `shared` can still reach :3015 by name; the app refuses
     # any source address that is not a bridge gateway (where host traffic
     # arrives). Not even loopback: inside the container that is the upstream
@@ -24,7 +25,7 @@ services:
     expose:
       - '3014'
     ports:
-      - '127.0.0.1:3015:3015'
+      - '127.0.0.1:3017:3015'
 
     environment:
       PORT: '3014'
