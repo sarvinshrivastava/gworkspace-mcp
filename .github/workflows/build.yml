@@ -73,15 +73,27 @@ jobs:
       - name: Smoke test — the server boots and serves health
         run: |
           set -euo pipefail
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+
+          # The dashboard password hash, made the way `npm run hash-password`
+          # makes it (same scrypt parameters and format), for password ci-admin.
+          ADMIN_HASH=$(python3 -c "
+          import base64, hashlib, os
+          salt = os.urandom(16)
+          key = hashlib.scrypt(b'ci-admin', salt=salt, n=16384, r=8, p=1, dklen=32)
+          print('scrypt\$16384\$8\$1\$' + base64.b64encode(salt).decode() + '\$' + base64.b64encode(key).decode())
+          ")
+          export ADMIN_HASH
+
           # A stub vault, answering per key. GOOGLE_TOKEN_JSON has to be a real
-          # OAuth document: the relay now refuses to hand the child anything
-          # without a refresh_token, because the upstream silently falls back to
-          # the INTERACTIVE consent flow on a bad one and then hangs forever.
+          # OAuth document: the relay refuses to hand the child anything without
+          # a refresh_token, because the upstream silently falls back to the
+          # INTERACTIVE consent flow on a bad one and then hangs forever.
           # Nothing here reaches Google — the upstream's authorize() makes no
           # network call, so the child boots and lists its tools on fake
           # credentials, and only a real tool CALL would need real ones.
           python3 -c "
-          import json
+          import json, os
           from http.server import BaseHTTPRequestHandler, HTTPServer
           VALUES = {
               'GWORKSPACE_MCP_TOKEN': 'ci-smoke',
@@ -93,6 +105,7 @@ jobs:
                   'client_secret': 'ci-client-secret',
                   'refresh_token': 'ci-refresh-token',
               }),
+              'DASHBOARD_ADMIN_PASSWORD_HASH': os.environ['ADMIN_HASH'],
           }
           class H(BaseHTTPRequestHandler):
               def log_message(self,*a): pass
@@ -108,32 +121,54 @@ jobs:
           sleep 1
 
           # The production sandbox, not a bare `docker run`: read-only rootfs,
-          # a tmpfs for the token store, dropped capabilities and the real memory
-          # ceiling. Without these flags a regression in any of them ships green
-          # and only fails on the VPS.
+          # a tmpfs for the token store, a FRESH named volume for the policy DB
+          # (proves the image's /state ownership carries over), dropped
+          # capabilities and the real memory ceiling. Without these flags a
+          # regression in any of them ships green and only fails on the VPS.
           #
-          # appendTableRows is in the allowlist on purpose: the upstream's source
+          # appendTableRows is in the allowlist on purpose. The upstream's source
           # registers it twice (docs and sheets) and registerTool throws on a
-          # duplicate name. FastMCP collapses the collision before tools/list, so
-          # it does not reach us today — this pins that, because if a future
-          # release stops collapsing it, createServer throws per request and every
-          # POST /mcp returns 500 while /healthz stays green.
-          docker run -d --name smoke --network host \
-            --read-only --tmpfs /tmp \
-            --tmpfs /data:uid=1000,gid=1000,mode=0700,size=8m \
-            --cap-drop ALL --security-opt no-new-privileges:true \
-            --memory 512m --memory-swap 640m \
-            -e SECRETS_MANAGER_URL=http://127.0.0.1:8890 \
-            -e SECRETS_MANAGER_TOKEN=ci \
-            -e PORT=3014 \
-            -e TOOL_ALLOWLIST=readDocument,appendText,appendTableRows \
-            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          # duplicate name. It is no longer in any grant's tool map, so it cannot
+          # reach registerTool at all: three names in, two tools out.
+          run_smoke() {
+            local name="$1"; shift
+            docker run -d --name "$name" --network host \
+              --read-only --tmpfs /tmp \
+              --tmpfs /data:uid=1000,gid=1000,mode=0700,size=8m \
+              --cap-drop ALL --security-opt no-new-privileges:true \
+              --memory 512m --memory-swap 640m \
+              -e SECRETS_MANAGER_URL=http://127.0.0.1:8890 \
+              -e SECRETS_MANAGER_TOKEN=ci \
+              -e PORT=3014 -e ADMIN_PORT=3015 \
+              "$@" "$IMAGE" > /dev/null
+          }
+          wait_healthy() {
+            for i in $(seq 1 30); do
+              if curl -sf http://127.0.0.1:3014/healthz > /dev/null; then return 0; fi
+              sleep 2
+            done
+            echo "never came up"; docker logs "$1"; exit 1
+          }
+          tool_count() {
+            curl -s -X POST http://127.0.0.1:3014/mcp \
+              -H 'Content-Type: application/json' \
+              -H 'Accept: application/json, text/event-stream' \
+              -H 'Authorization: Bearer ci-smoke' \
+              -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+              | sed -n 's/^data: //p' | python3 -c "
+          import sys, json
+          r = json.load(sys.stdin)
+          print(len(r['result']['tools']) if 'result' in r else 0)"
+          }
+          health_field() {
+            curl -s http://127.0.0.1:3014/healthz | python3 -c "import sys,json; print(json.load(sys.stdin)['$1'])"
+          }
 
-          for i in $(seq 1 30); do
-            if curl -sf http://127.0.0.1:3014/healthz > /dev/null; then echo "health ok"; break; fi
-            if [ "$i" = "30" ]; then echo "never came up"; docker logs smoke; exit 1; fi
-            sleep 2
-          done
+          docker volume create smoke-state > /dev/null
+          run_smoke smoke -v smoke-state:/state -e TOOL_ALLOWLIST=readDocument,appendText,appendTableRows
+          wait_healthy smoke
+          [ "$(health_field db)" = "True" ] || { echo "expected db:true"; docker logs smoke; exit 1; }
+          echo "health ok, policy db open"
 
           # An unauthenticated call must be refused.
           code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:3014/mcp \
@@ -141,32 +176,41 @@ jobs:
           [ "$code" = "401" ] || { echo "expected 401 without a bearer, got $code"; docker logs smoke; exit 1; }
           echo "auth gate ok"
 
-          # Exactly three names in, exactly three tools out: proves the duplicate
-          # registration is deduplicated rather than throwing, and that the
-          # allowlist is applied.
-          tools=$(curl -s -X POST http://127.0.0.1:3014/mcp \
-            -H 'Content-Type: application/json' \
-            -H 'Accept: application/json, text/event-stream' \
-            -H 'Authorization: Bearer ci-smoke' \
-            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
-            | sed -n 's/^data: //p' | python3 -c "import sys,json; print(len(json.load(sys.stdin)['result']['tools']))")
-          [ "$tools" = "3" ] || { echo "expected 3 tools, got $tools"; docker logs smoke; exit 1; }
-          echo "tool registration ok"
+          tools=$(tool_count)
+          [ "$tools" = "2" ] || { echo "expected 2 tools, got $tools"; docker logs smoke; exit 1; }
+          echo "legacy bearer → default agent → 2 tools ok"
+
+          # The dashboard: login, CSRF, and a grant edit that must survive a
+          # restart (proves the default agent is seeded once, never re-seeded).
+          JAR=$(mktemp)
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3015/login)
+          [ "$code" = "200" ] || { echo "admin login page: $code"; docker logs smoke; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -c "$JAR" -d 'password=ci-admin' http://127.0.0.1:3015/login)
+          [ "$code" = "303" ] || { echo "admin login: expected 303, got $code"; docker logs smoke; exit 1; }
+          grep -q gws_admin_sid "$JAR" || { echo "no session cookie"; exit 1; }
+          CSRF=$(curl -s -b "$JAR" http://127.0.0.1:3015/agents/default | sed -n 's/.*name="_csrf" value="\([^"]*\)".*/\1/p' | head -1)
+          [ -n "$CSRF" ] || { echo "no csrf token on the agent page"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -d 'g=docs:read' http://127.0.0.1:3015/agents/default/grants)
+          [ "$code" = "403" ] || { echo "POST without csrf: expected 403, got $code"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" --data-urlencode "_csrf=$CSRF" -d 'g=docs:read' http://127.0.0.1:3015/agents/default/grants)
+          [ "$code" = "303" ] || { echo "grant edit: expected 303, got $code"; exit 1; }
+          echo "dashboard login, csrf and grant edit ok"
+
+          docker restart smoke > /dev/null
+          wait_healthy smoke
+          tools=$(tool_count)
+          [ "$tools" = "1" ] || { echo "expected 1 tool after the edit survived a restart, got $tools"; docker logs smoke; exit 1; }
+          echo "grant edit survived a restart (no re-seed) ok"
+
+          MEM=$(docker stats --no-stream --format '{{.MemUsage}}' smoke)
+          echo "IDLE_MEM=$MEM" >> "$GITHUB_ENV"
+          docker rm -f smoke > /dev/null
 
           # An empty allowlist must expose NOTHING. The unfiltered upstream
           # surface includes sendEmail, deleteFile and setFilePermission.
-          docker rm -f smoke > /dev/null
-          docker run -d --name smoke-deny --network host \
-            --read-only --tmpfs /tmp \
-            --tmpfs /data:uid=1000,gid=1000,mode=0700,size=8m \
-            -e SECRETS_MANAGER_URL=http://127.0.0.1:8890 \
-            -e SECRETS_MANAGER_TOKEN=ci -e PORT=3014 \
-            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
-          for i in $(seq 1 30); do
-            if curl -sf http://127.0.0.1:3014/healthz > /dev/null; then break; fi
-            if [ "$i" = "30" ]; then echo "deny-all case never came up"; docker logs smoke-deny; exit 1; fi
-            sleep 2
-          done
+          docker volume create smoke-deny-state > /dev/null
+          run_smoke smoke-deny -v smoke-deny-state:/state
+          wait_healthy smoke-deny
           curl -s -X POST http://127.0.0.1:3014/mcp \
             -H 'Content-Type: application/json' \
             -H 'Accept: application/json, text/event-stream' \
@@ -188,6 +232,16 @@ jobs:
           "
           docker rm -f smoke-deny > /dev/null
 
+          # No volume on a read-only rootfs: the DB cannot be created, so the
+          # service must come up degraded — legacy bearer served, db:false.
+          run_smoke smoke-degraded -e TOOL_ALLOWLIST=readDocument,appendText,appendTableRows
+          wait_healthy smoke-degraded
+          [ "$(health_field db)" = "False" ] || { echo "expected db:false"; docker logs smoke-degraded; exit 1; }
+          tools=$(tool_count)
+          [ "$tools" = "2" ] || { echo "degraded: expected 2 tools, got $tools"; docker logs smoke-degraded; exit 1; }
+          echo "degraded mode ok"
+          docker rm -f smoke-degraded > /dev/null
+
       - name: Report
         run: |
           set -euo pipefail
@@ -196,6 +250,8 @@ jobs:
             echo "### gworkspace-mcp built"
             echo ""
             echo "Uncompressed size: **$(( SIZE / 1024 / 1024 )) MB**"
+            echo ""
+            echo "Idle memory after boot (not under load): **${IDLE_MEM:-unknown}** of 512 MiB"
             echo ""
             echo "Digest: \`${{ steps.build.outputs.digest }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
