@@ -501,11 +501,15 @@ test("the agents page explains first-run when only default exists", async () => 
 });
 
 test("the lockout window slides: a burst across a window edge still locks", () => {
+  // A window anchored at the first failure would reset at 16 min and count 2;
+  // a sliding one counts the five inside [1 min, 16 min].
   let now = 0;
   const limiter = new LoginLimiter(() => now);
+  limiter.fail("a");
   now = 10 * 60_000;
-  for (let i = 0; i < 4; i++) limiter.fail("a");
+  for (let i = 0; i < 3; i++) limiter.fail("a");
   now = 16 * 60_000;
+  assert.equal(limiter.fail("a"), false);
   assert.equal(limiter.fail("a"), true);
   assert.equal(limiter.locked("a"), true);
 });

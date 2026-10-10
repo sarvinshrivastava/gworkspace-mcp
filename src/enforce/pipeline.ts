@@ -92,9 +92,9 @@ export function denyMessage(reason: DenyReason, id?: string): string {
     case "calendar_not_primary":
       return "Denied: events can only be written to this account's own calendar (calendarId \"primary\").";
     case "event_unverifiable":
-      return "Could not check this event's guests, so its title, description and location were not changed. Try again; changing only its time does not need the check.";
+      return "Could not check this event's guests, so it was not changed. Try again; changing only its time does not need the check.";
     case "event_has_guests":
-      return "Denied: that event has guests, so its title, description and location cannot be changed here. Changing its time is allowed.";
+      return "Denied: that event has guests, so only its time (start, end) can be changed here.";
     case "not_enabled":
     case "unmapped":
       return "Denied: this tool is not enabled for this agent.";
