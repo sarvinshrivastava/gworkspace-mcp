@@ -1,204 +1,175 @@
 /**
- * gworkspace-mcp — puts the Google Workspace MCP server on Streamable HTTP.
+ * gworkspace-mcp — puts the Google Workspace MCP server on Streamable HTTP,
+ * one policy-scoped identity per agent.
  *
  * The upstream server (@a-bonus/google-docs-mcp) speaks stdio. Open WebUI's MCP
  * client speaks Streamable HTTP and nothing else — its utils/mcp/client.py
  * imports streamablehttp_client alone — so the two cannot talk directly. This
- * process runs the stdio server as a child and relays between them.
- *
- * It is a relay, not a reimplementation: whatever tools that server exposes are
- * what appear in chat, so it keeps working when the upstream adds tools.
+ * process runs the stdio server as a child and relays between them, deciding
+ * per bearer which tools exist and which files they may touch.
  *
  * Two SDK majors on purpose: v2 has no stdio client transport, v1 does, and the
  * two speak the same protocol over the wire.
+ *
+ * This file is boot wiring only:
+ *   1. open the policy DB (before any listener, so no request sees it half-open)
+ *   2. listen on :3014 (MCP) and :3015 (admin)
+ *   3. read the vault, build the Drive client, start the child, mark ready
  */
 
-import crypto from "node:crypto";
-import express from "express";
-import { McpServer, fromJsonSchema } from "@modelcontextprotocol/server";
-import type { CallToolResult } from "@modelcontextprotocol/server";
-import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
+import { createAdminApp } from "./admin/app.js";
+import { makeAllowedSources } from "./admin/security.js";
+import { Audit } from "./audit.js";
+import { config, vaultFetch, vaultFetchOptional } from "./config.js";
+import { DriveClient } from "./drive/client.js";
+import { ScopeResolver } from "./enforce/resolver.js";
+import { SubtreeCache } from "./enforce/search.js";
+import { createMcpApp } from "./gateway.js";
+import {
+  makeAuthenticator,
+  makeDegradedAuthenticator,
+  type Authenticator,
+} from "./policy/auth.js";
+import { DEFAULT_GRANTS } from "./policy/derive.js";
+import { OpenError, backupDaily, openPolicyStore, type PolicyStore } from "./policy/store.js";
+import {
+  connectUpstream,
+  describeResult,
+  normaliseToken,
+  refreshTokenOf,
+  upstreamState,
+} from "./upstream.js";
 
-import { config, vaultFetch } from "./config.js";
-import { connectUpstream, describeResult, upstreamState } from "./upstream.js";
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+let store: PolicyStore | null = null;
+let dbError: string | null = null;
+let audit: Audit | null = null;
+let legacyToken = "";
+let passwordHash: string | null = null;
+let drive: DriveClient | null = null;
+let ready = false;
 
 /**
- * Arguments the relay refuses to pass upstream, by tool.
+ * The policy DB, or degraded mode.
  *
- * createEvent is an outbound channel: attendees[].email is an arbitrary address
- * and description is arbitrary text, so a document containing injected
- * instructions — one shared with this account by anyone — turns a read tool and
- * a calendar tool into mail-it-to-me. The event still gets created; it just
- * cannot address a stranger. updateEvent carries the same two fields.
+ * A database that EXISTED may hold restrictions — `default` narrowed, tokens
+ * revoked — so failing to read it must stop the service, visibly, rather than
+ * serve without them. A database that never existed and cannot be created
+ * (first boot on a missing or read-only volume) restricts nothing: the legacy
+ * bearer gets exactly what a first boot would have seeded, and Open WebUI
+ * keeps working while /healthz says `db: false`.
  */
-const ARGUMENT_GUARDS: Record<string, (args: Record<string, unknown>) => Record<string, unknown>> = {
-  createEvent: stripAttendees,
-  updateEvent: stripAttendees,
-};
-
-function stripAttendees(args: Record<string, unknown>): Record<string, unknown> {
-  const { attendees, ...rest } = args;
-  if (attendees !== undefined) {
-    console.warn("[guard] dropped attendees from a calendar call");
-  }
-  return { ...rest, sendUpdates: "none" };
-}
-
-const fail = (why: string) => ({
-  content: [{ type: "text" as const, text: `Failed: ${why}` }],
-  isError: true,
-});
-
-/**
- * A server exposing the selected tools verbatim.
- *
- * Schemas are passed through with fromJsonSchema rather than re-declared: the
- * upstream owns them, and re-typing ~120 tool schemas by hand would be wrong
- * within a release.
- */
-function createServer(): McpServer {
-  const server = new McpServer({ name: "gworkspace", version: "0.1.0" });
-
-  for (const tool of upstreamState.exposedTools) {
-    server.registerTool(
-      tool.name,
-      {
-        description: tool.description ?? `Google Workspace: ${tool.name}`,
-        inputSchema: fromJsonSchema(tool.inputSchema),
-      },
-      async (args: unknown) => {
-        const raw = (args ?? {}) as Record<string, unknown>;
-        // Argument KEYS only. The values are document text, spreadsheet cells,
-        // search queries and calendar descriptions — user content, sometimes
-        // personal, going into a log file with no retention policy of its own.
-        console.log(`[tool] ${tool.name} (${Object.keys(raw).join(", ")})`);
-        const upstream = upstreamState.client;
-        if (!upstream) return fail("the Workspace server has exited.");
-        const callArgs = ARGUMENT_GUARDS[tool.name]?.(raw) ?? raw;
-        try {
-          const result = await upstream.callTool({
-            name: tool.name,
-            arguments: callArgs,
-          });
-          // The upstream reports tool failures through FastMCP's log channel,
-          // which is an MCP notification rather than stderr — so a failing call
-          // left NOTHING in docker logs and the only account of it was whatever
-          // the model chose to say. The relay sees every result, so it logs the
-          // failures here.
-          if ((result as { isError?: boolean }).isError) {
-            console.error(`[tool] ${tool.name} FAILED: ${describeResult(result)}`);
-          }
-          return result as CallToolResult;
-        } catch (error) {
-          return fail(error instanceof Error ? error.message : String(error));
-        }
-      },
-    );
-  }
-
-  return server;
-}
-
-const app = express();
-
-// NOT app-level: mounted on the tool route only, and after the auth check, so
-// anything else on the shared Docker network cannot make this 0.25-vCPU service
-// parse megabytes of JSON per request with no credential.
-const parseJson = express.json({ limit: "4mb" });
-
-app.get("/healthz", (_req, res) => {
-  const healthy = Boolean(upstreamState.client);
-  // 503, not a false 200: this is what autoheal and the deploy's health wait
-  // read, and a relay with a dead child serves every tool call as an error.
-  res.status(healthy ? 200 : 503).json({
-    status: healthy,
-    tools: upstreamState.exposedTools.length,
-    upstreamTools: upstreamState.upstreamToolCount,
-  });
-});
-
-let bearerToken = "";
-
-function tokenMatches(provided: string): boolean {
-  if (!bearerToken) return false;
-  // Digest both sides first: timingSafeEqual throws on a length mismatch, which
-  // would itself be the leak.
-  const a = crypto.createHash("sha256").update(provided).digest();
-  const b = crypto.createHash("sha256").update(bearerToken).digest();
-  return crypto.timingSafeEqual(a, b);
-}
-
-app.post("/mcp", (req, res, next) => {
-  const provided = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
-  if (!tokenMatches(provided)) {
-    console.warn(`[auth] rejected request from ${req.ip ?? "unknown"}`);
-    res.status(401).json({ error: "unauthorized" });
-    return;
-  }
-  parseJson(req, res, next);
-});
-
-app.post("/mcp", async (req, res) => {
-  const transport = new NodeStreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-  });
-  let server: McpServer;
+function openStore(): void {
   try {
-    server = createServer();
+    store = openPolicyStore(config.dbPath);
   } catch (error) {
-    // Degrade one request rather than every request. Registration is validated
-    // at boot, so reaching here means a schema the SDK's Ajv would not compile.
+    if (error instanceof OpenError && !error.existed) {
+      dbError = error.message;
+      console.error(
+        `[db] DEGRADED: cannot create the policy database at ${config.dbPath} (${error.message}). The legacy bearer is served with today's 20 tools; minted tokens are refused; the dashboard is read-only. Mount a writable volume at ${config.dbPath.replace(/\/[^/]+$/, "")}.`,
+      );
+      return;
+    }
     console.error(
-      `[mcp] could not build the tool server: ${error instanceof Error ? error.message : String(error)}`,
+      `FATAL: policy DB exists but cannot be opened at ${config.dbPath}: ${error instanceof Error ? error.message : String(error)}. Refusing to start without the restrictions it holds. Restore it from ${config.backupDir} (see docker-compose.yml) or fix its permissions.`,
     );
-    res.status(503).json({ error: "tools unavailable" });
-    return;
+    process.exit(1);
   }
-  res.on("close", () => {
-    void transport.close?.();
-    void server.close?.();
-  });
-  await server.connect(transport);
-  await transport.handleRequest(req, res, req.body);
-});
 
-// Registered after the POST routes, so POST still wins.
-app.all("/mcp", (_req, res) => {
-  res.status(405).set("Allow", "POST").json({
-    jsonrpc: "2.0",
-    error: {
-      code: -32000,
-      message: "Method not allowed. This server is stateless; use POST.",
-    },
-    id: null,
-  });
-});
+  if (store.ensureDefaultAgent(DEFAULT_GRANTS)) {
+    console.log("[db] created the default agent for the legacy bearer, with today's 20 tools");
+  }
+  audit = new Audit(store);
+
+  const housekeeping = () => {
+    audit?.prune();
+    if (store) {
+      backupDaily(store, config.backupDir).catch((error) =>
+        console.error(`[db] backup failed: ${error instanceof Error ? error.message : String(error)}`),
+      );
+    }
+  };
+  housekeeping();
+  setInterval(housekeeping, DAY_MS).unref();
+}
 
 async function main() {
-  await new Promise<void>((resolve) => {
-    app.listen(config.port, "0.0.0.0", () => {
-      console.log(`gworkspace-mcp listening on :${config.port}`);
-      resolve();
-    });
+  openStore();
+
+  const legacy = () => legacyToken;
+  const authenticator: Authenticator = store
+    ? makeAuthenticator(store, legacy)
+    : makeDegradedAuthenticator(legacy);
+  const resolver = new ScopeResolver(() => drive);
+  const subtree = new SubtreeCache(() => drive);
+
+  const mcpApp = createMcpApp({
+    authenticate: () => authenticator,
+    audit: () => audit,
+    pipeline: { resolver, subtree, drive: () => drive },
+    upstream: upstreamState,
+    ready: () => ready,
+    health: () => ({ db: store !== null, auditErrors: audit?.errors ?? 0 }),
   });
 
-  // Concurrently: four sequential fetches against a slow vault is 4 x (4
-  // attempts x 15s timeout + backoff), which outlasts both start_period and the
-  // deploy's health wait.
-  const [token, clientId, clientSecret, tokenJson] = await Promise.all([
+  const adminApp = createAdminApp({
+    store: () => store,
+    dbError: () => dbError,
+    audit: () => audit,
+    drive: () => drive,
+    resolver,
+    subtree,
+    passwordHash: () => passwordHash,
+    exposedOrder: () => upstreamState.exposedTools.map((t) => t.name),
+    withheld: () => upstreamState.withheld,
+    allowed: makeAllowedSources(config.adminAllowedSources),
+  });
+
+  await Promise.all([
+    new Promise<void>((resolve) => {
+      mcpApp.listen(config.port, "0.0.0.0", () => {
+        console.log(`gworkspace-mcp listening on :${config.port}`);
+        resolve();
+      });
+    }),
+    new Promise<void>((resolve) => {
+      // 0.0.0.0 so the 127.0.0.1-only host publish can reach it; the app's
+      // source allowlist is what keeps other containers out.
+      adminApp.listen(config.adminPort, "0.0.0.0", () => {
+        console.log(`admin dashboard listening on :${config.adminPort}`);
+        resolve();
+      });
+    }),
+  ]);
+
+  // Concurrently: sequential fetches against a slow vault is n x (4 attempts x
+  // 15s timeout + backoff), which outlasts both start_period and the deploy's
+  // health wait.
+  const [token, clientId, clientSecret, tokenJson, hash] = await Promise.all([
     vaultFetch("GWORKSPACE_MCP_TOKEN"),
     vaultFetch("GOOGLE_CLIENT_ID"),
     vaultFetch("GOOGLE_CLIENT_SECRET"),
     vaultFetch("GOOGLE_TOKEN_JSON"),
+    vaultFetchOptional("DASHBOARD_ADMIN_PASSWORD_HASH"),
   ]);
-  bearerToken = token;
+  legacyToken = token;
+  passwordHash = hash;
+  if (!hash) console.warn("[admin] no DASHBOARD_ADMIN_PASSWORD_HASH in the vault — dashboard login is disabled");
 
   // Nothing reads the vault after boot, and this process spawns a child that
   // parses untrusted document text. Drop the capability once it is spent.
   delete process.env.SECRETS_MANAGER_TOKEN;
   config.vault.token = "";
 
-  await connectUpstream({ clientId, clientSecret, tokenJson });
+  // The gateway's own Drive client, for scope lookups. Same credential as the
+  // child; it never leaves this process.
+  // Normalised once here; connectUpstream's own pass is then silent.
+  const normalised = normaliseToken(tokenJson);
+  drive = new DriveClient({ clientId, clientSecret, refreshToken: refreshTokenOf(normalised) });
+
+  await connectUpstream({ clientId, clientSecret, tokenJson: normalised });
+  ready = true;
   console.log(
     `exposing: ${upstreamState.exposedTools.map((t) => t.name).join(", ") || "(none)"}`,
   );
@@ -230,6 +201,18 @@ async function main() {
       `[upstream] CREDENTIAL CHECK could not run: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+}
+
+// Node as PID 1 under `init: true` gets SIGTERM on every deploy. Closing the
+// database checkpoints the WAL, so a restore never meets a stale -wal file.
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.on(signal, () => {
+    try {
+      store?.close();
+    } finally {
+      process.exit(0);
+    }
+  });
 }
 
 main().catch((error) => {

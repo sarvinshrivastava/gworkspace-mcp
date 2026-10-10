@@ -17,6 +17,19 @@ const env = (key: string, fallback?: string): string => {
 export const config = {
   port: Number(env("PORT", "3014")),
 
+  /** The admin dashboard's own listener. Never routed /mcp. */
+  adminPort: Number(env("ADMIN_PORT", "3015")),
+
+  /** The policy database, on a named volume. Holds hashes only, no secrets. */
+  dbPath: env("DB_PATH", "/state/gworkspace-v2.sqlite"),
+  backupDir: env("BACKUP_DIR", "/state/backups"),
+
+  /** Extra exact source addresses allowed on the admin port, comma-separated. */
+  adminAllowedSources: (process.env.ADMIN_ALLOWED_SOURCES ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+
   /** The pinned upstream server's entry point, inside this image. */
   upstreamEntry: env(
     "UPSTREAM_ENTRY",
@@ -82,7 +95,18 @@ export function parseVaultBody(text: string, label: string): string {
   return parsed.value;
 }
 
-export async function vaultFetch(key: string): Promise<string> {
+/**
+ * Like vaultFetch, but a key that is not in the vault (404) is "" rather than
+ * fatal. For settings the service can run without, like the dashboard login.
+ */
+export function vaultFetchOptional(key: string): Promise<string> {
+  return vaultFetch(key, { optional: true });
+}
+
+export async function vaultFetch(
+  key: string,
+  opts: { optional?: boolean } = {},
+): Promise<string> {
   if (!config.vault.token)
     throw new Error("FATAL: SECRETS_MANAGER_TOKEN is empty");
 
@@ -111,6 +135,10 @@ export async function vaultFetch(key: string): Promise<string> {
       continue;
     }
 
+    if (res.status === 404 && opts.optional) {
+      console.warn(`[vault] ${label} is not set`);
+      return "";
+    }
     if (res.status === 401 || res.status === 403 || res.status === 404) {
       throw new Error(`FATAL: vault returned HTTP ${res.status} for ${label}`);
     }
