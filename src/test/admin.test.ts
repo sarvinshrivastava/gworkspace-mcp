@@ -1,0 +1,357 @@
+import { test, after } from "node:test";
+import assert from "node:assert/strict";
+import type { Server } from "node:http";
+
+import { Audit } from "../audit.js";
+import { createAdminApp, parseFolderInput, type AdminDeps } from "../admin/app.js";
+import { esc, html } from "../admin/html.js";
+import {
+  LoginLimiter,
+  SessionStore,
+  firstHosts,
+  gatewaysFromRoute,
+  hashPassword,
+  makeAllowedSources,
+  verifyPassword,
+} from "../admin/security.js";
+import { ScopeResolver } from "../enforce/resolver.js";
+import { SubtreeCache } from "../enforce/search.js";
+import { DEFAULT_GRANTS } from "../policy/derive.js";
+import type { PolicyStore } from "../policy/store.js";
+import { FakeDrive, TODAYS_TOOLS, listen, tempStore } from "./helpers.js";
+
+const servers: Server[] = [];
+after(() => servers.forEach((s) => s.close()));
+
+const PASSWORD = "correct horse battery";
+const HASH = hashPassword(PASSWORD);
+
+async function boot(
+  opts: { allowed?: Set<string>; hash?: string | null; store?: PolicyStore | null; now?: () => number } = {},
+) {
+  const store = opts.store === undefined ? tempStore() : opts.store;
+  store?.ensureDefaultAgent(DEFAULT_GRANTS);
+  const drive = new FakeDrive();
+  drive.files.set("root", { id: "my-drive-root", name: "My Drive", mimeType: "application/vnd.google-apps.folder", parents: [], trashed: false });
+  drive.folder("my-drive-root", []);
+  drive.folder("scope-F-0001", ["my-drive-root"], { name: "Project F" });
+  drive.folder("evil-folder1", ["my-drive-root"], { name: '<img src=x onerror=alert(1)>' });
+  drive.folder("trashed-fold", ["my-drive-root"], { trashed: true });
+  drive.add("a-plain-file", ["my-drive-root"]);
+  drive.folder("shared-noparent", [], { name: "Shared with me" });
+  const audit = store ? new Audit(store) : null;
+  const now = opts.now ?? Date.now;
+  const deps: AdminDeps = {
+    store: () => store,
+    dbError: () => (store ? null : "disk on fire"),
+    audit: () => audit,
+    drive: () => drive,
+    resolver: new ScopeResolver(() => drive),
+    subtree: new SubtreeCache(() => drive),
+    passwordHash: () => (opts.hash === undefined ? HASH : opts.hash),
+    exposedOrder: () => TODAYS_TOOLS,
+    withheld: () => ({ scoped: new Set(), all: new Set() }),
+    allowed: () => opts.allowed ?? new Set(["127.0.0.1", "::ffff:127.0.0.1"]),
+    sessions: new SessionStore(now),
+    limiter: new LoginLimiter(now),
+  };
+  const { url, server } = await listen(createAdminApp(deps));
+  servers.push(server);
+  return { url, store: store!, drive, audit };
+}
+
+type Reply = { status: number; text: string; location: string | null; cookie: string | null };
+
+async function request(url: string, path: string, opts: { method?: string; cookie?: string; form?: Record<string, string | string[]>; headers?: Record<string, string> } = {}): Promise<Reply> {
+  let body: string | undefined;
+  if (opts.form) {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(opts.form)) for (const item of [v].flat()) params.append(k, item);
+    body = params.toString();
+  }
+  const res = await fetch(url + path, {
+    method: opts.method ?? (body !== undefined ? "POST" : "GET"),
+    redirect: "manual",
+    headers: {
+      ...(body !== undefined ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
+      ...(opts.cookie ? { Cookie: opts.cookie } : {}),
+      ...opts.headers,
+    },
+    body,
+  });
+  return { status: res.status, text: await res.text(), location: res.headers.get("location"), cookie: res.headers.get("set-cookie") };
+}
+
+async function login(url: string) {
+  const reply = await request(url, "/login", { form: { password: PASSWORD } });
+  assert.equal(reply.status, 303, reply.text);
+  const cookie = reply.cookie!.split(";")[0]!;
+  const home = await request(url, "/", { cookie });
+  const csrf = /name="_csrf" value="([^"]+)"/.exec(home.text)![1]!;
+  return { cookie, csrf, setCookie: reply.cookie! };
+}
+
+// --- primitives ------------------------------------------------------------
+
+test("html`` escapes values and attributes, passes Safe through", () => {
+  assert.equal(esc(`<a href="x">'&`), "&lt;a href=&quot;x&quot;&gt;&#39;&amp;");
+  const evil = "<script>alert(1)</script>";
+  assert.equal(html`<p title="${evil}">${evil}</p>`.__html, `<p title="${esc(evil)}">${esc(evil)}</p>`);
+  assert.equal(html`<div>${html`<b>ok</b>`}</div>`.__html, "<div><b>ok</b></div>");
+  assert.equal(html`${[1, "<", null, false, undefined]}`.__html, "1&lt;");
+});
+
+test("gatewaysFromRoute reads little-endian hex", () => {
+  const text = "Iface\tDestination\tGateway \tFlags\neth0\t00000000\t010012AC\t0003\neth0\t000012AC\t00000000\t0001\n";
+  assert.deepEqual(gatewaysFromRoute(text), ["172.18.0.1"]);
+});
+
+test("firstHosts derives each bridge's gateway", () => {
+  const got = firstHosts({
+    eth0: [{ address: "172.18.0.5", netmask: "255.255.0.0", family: "IPv4", internal: false, mac: "", cidr: null }],
+    eth1: [{ address: "10.9.8.7", netmask: "255.255.255.0", family: "IPv4", internal: false, mac: "", cidr: null }],
+    lo: [{ address: "127.0.0.1", netmask: "255.0.0.0", family: "IPv4", internal: true, mac: "", cidr: null }],
+  });
+  assert.deepEqual(got.sort(), ["10.9.8.1", "172.18.0.1"]);
+});
+
+test("allowed sources recompute after 60 s and survive no /proc/net/route", () => {
+  let now = 0;
+  let ifaces: Record<string, any> = {
+    eth0: [{ address: "172.18.0.5", netmask: "255.255.0.0", family: "IPv4", internal: false }],
+  };
+  const allowed = makeAllowedSources(["192.0.2.9"], { interfaces: () => ifaces, routeText: () => null }, () => now);
+  const first = allowed();
+  assert.ok(first.has("127.0.0.1") && first.has("::1") && first.has("172.18.0.1") && first.has("::ffff:172.18.0.1") && first.has("192.0.2.9"));
+  ifaces = { eth1: [{ address: "10.5.0.3", netmask: "255.255.255.0", family: "IPv4", internal: false }] };
+  assert.ok(!allowed().has("10.5.0.1"));
+  now += 60_001;
+  assert.ok(allowed().has("10.5.0.1"));
+});
+
+test("hashPassword / verifyPassword round-trip; malformed hashes fail", async () => {
+  assert.equal(await verifyPassword(PASSWORD, HASH), true);
+  assert.equal(await verifyPassword("wrong", HASH), false);
+  assert.equal(await verifyPassword(PASSWORD, "plain"), false);
+  assert.equal(await verifyPassword(PASSWORD, "scrypt$1048576$8$1$AAAA$AAAA"), false);
+});
+
+test("LoginLimiter locks one source after 5 failures, not others", () => {
+  let now = 0;
+  const limiter = new LoginLimiter(() => now);
+  for (let i = 0; i < 5; i++) limiter.fail("a");
+  assert.equal(limiter.locked("a"), true);
+  assert.equal(limiter.locked("b"), false);
+  now += 15 * 60_000 + 1;
+  assert.equal(limiter.locked("a"), false);
+});
+
+test("sessions expire when idle for 30 min and after 8 h regardless", () => {
+  let now = 0;
+  const store = new SessionStore(() => now);
+  const idle = store.create();
+  now += 30 * 60_000 + 1;
+  assert.equal(store.get(idle.id), null);
+  const busy = store.create();
+  for (let i = 0; i < 20; i++) {
+    now += 25 * 60_000;
+    if (i < 18) assert.ok(store.get(busy.id), `alive at step ${i}`);
+  }
+  assert.equal(store.get(busy.id), null);
+  const swept = store.create();
+  now += 31 * 60_000;
+  store.sweep();
+  assert.equal(store.size, 0);
+  assert.equal(store.get(swept.id), null);
+});
+
+test("parseFolderInput accepts an ID or a folder URL, nothing else", () => {
+  assert.equal(parseFolderInput("scope-F-0001"), "scope-F-0001");
+  assert.equal(parseFolderInput("https://drive.google.com/drive/folders/scope-F-0001?usp=sharing"), "scope-F-0001");
+  assert.equal(parseFolderInput("https://drive.google.com/open?id=scope-F-0001"), "scope-F-0001");
+  assert.equal(parseFolderInput("x' or '1"), null);
+  assert.equal(parseFolderInput(["scope-F-0001"]), null);
+});
+
+// --- the app ---------------------------------------------------------------
+
+test("a source outside the allowlist is 403, whatever X-Forwarded-For says", async () => {
+  const { url } = await boot({ allowed: new Set(["10.0.0.1"]) });
+  assert.equal((await request(url, "/login")).status, 403);
+  assert.equal((await request(url, "/login", { headers: { "X-Forwarded-For": "10.0.0.1" } })).status, 403);
+});
+
+test("security headers are present", async () => {
+  const { url } = await boot();
+  const res = await fetch(`${url}/login`);
+  assert.match(res.headers.get("content-security-policy") ?? "", /default-src 'none'/);
+  assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+});
+
+test("login page states: starting, not configured, form", async () => {
+  assert.match((await request((await boot({ hash: null })).url, "/login")).text, /Starting/);
+  assert.match((await request((await boot({ hash: "" })).url, "/login")).text, /not configured/);
+  assert.match((await request((await boot()).url, "/login")).text, /type="password"/);
+});
+
+test("POST /login needs no session; the cookie is HttpOnly, SameSite=Strict, not Secure on http", async () => {
+  const { url } = await boot();
+  const { setCookie } = await login(url);
+  assert.match(setCookie, /^gws_admin_sid=/);
+  assert.match(setCookie, /HttpOnly/);
+  assert.match(setCookie, /SameSite=Strict/);
+  assert.match(setCookie, /Path=\//);
+  assert.doesNotMatch(setCookie, /Secure/);
+});
+
+test("five wrong passwords lock the source, even against the right one", async () => {
+  const { url, store } = await boot();
+  for (let i = 0; i < 5; i++) {
+    assert.equal((await request(url, "/login", { form: { password: "nope" } })).status, 401);
+  }
+  assert.equal((await request(url, "/login", { form: { password: PASSWORD } })).status, 429);
+  assert.ok(store.queryAudit({ limit: 10 }).some((r) => r.reason === "login"));
+});
+
+test("pages without a session redirect to login", async () => {
+  const { url } = await boot();
+  const reply = await request(url, "/");
+  assert.equal(reply.status, 303);
+  assert.equal(reply.location, "/login");
+});
+
+test("a POST without a CSRF token, or with an array, is 403", async () => {
+  const { url } = await boot();
+  const { cookie, csrf } = await login(url);
+  assert.equal((await request(url, "/agents", { cookie, form: { slug: "x1", name: "X" } })).status, 403);
+  assert.equal((await request(url, "/agents", { cookie, form: { slug: "x1", name: "X", _csrf: [csrf, csrf] } })).status, 403);
+});
+
+test("create agent: confined, with warnings", async () => {
+  const { url, store } = await boot();
+  const { cookie, csrf } = await login(url);
+  const created = await request(url, "/agents", { cookie, form: { slug: "ops-agent", name: "Ops", _csrf: csrf } });
+  assert.equal(created.location, "/agents/ops-agent");
+  assert.equal(store.getAgent("ops-agent")?.scoped, true);
+  const pageText = (await request(url, "/agents/ops-agent", { cookie })).text;
+  assert.match(pageText, /No folder assigned/);
+  const dup = await request(url, "/agents", { cookie, form: { slug: "ops-agent", name: "Ops", _csrf: csrf } });
+  assert.equal(dup.location, "/");
+  assert.match((await request(url, "/", { cookie })).text, /already exists/);
+});
+
+test("grants: one value, two values, unknown key", async () => {
+  const { url, store } = await boot();
+  const { cookie, csrf } = await login(url);
+  await request(url, "/agents", { cookie, form: { slug: "g1", name: "G", _csrf: csrf } });
+  assert.equal((await request(url, "/agents/g1/grants", { cookie, form: { g: "docs:read", _csrf: csrf } })).status, 303);
+  assert.deepEqual(store.getGrants("g1"), [{ area: "docs", op: "read" }]);
+  await request(url, "/agents/g1/grants", { cookie, form: { g: ["docs:read", "drive:read"], _csrf: csrf } });
+  assert.equal(store.getGrants("g1").length, 2);
+  assert.equal((await request(url, "/agents/g1/grants", { cookie, form: { g: ["docs:read", "gmail:read"], _csrf: csrf } })).status, 400);
+  assert.equal(store.getGrants("g1").length, 2);
+  await request(url, "/agents/g1/grants", { cookie, form: { g: "docs:read", _csrf: csrf } });
+  assert.match((await request(url, "/agents/g1", { cookie })).text, /No discovery tool/);
+});
+
+test("a minted token is shown exactly once, then revocable", async () => {
+  const { url, store } = await boot();
+  const { cookie, csrf } = await login(url);
+  await request(url, "/agents", { cookie, form: { slug: "t1", name: "T", _csrf: csrf } });
+  await request(url, "/agents/t1/tokens", { cookie, form: { label: "owui", _csrf: csrf } });
+  const first = (await request(url, "/agents/t1", { cookie })).text;
+  const token = /<code>(gws_[A-Za-z0-9_-]{43})<\/code>/.exec(first)?.[1];
+  assert.ok(token, "token shown");
+  assert.doesNotMatch((await request(url, "/agents/t1", { cookie })).text, /gws_[A-Za-z0-9_-]{43}/);
+  const [row] = store.listTokens("t1");
+  const revoke = await request(url, `/tokens/${row!.id}/revoke`, { cookie, form: { _csrf: csrf } });
+  assert.equal(revoke.location, "/agents/t1");
+  assert.notEqual(store.listTokens("t1")[0]!.revokedAt, null);
+});
+
+test("adding scopes validates against Drive", async () => {
+  const { url, store } = await boot();
+  const { cookie, csrf } = await login(url);
+  await request(url, "/agents", { cookie, form: { slug: "s1", name: "S", _csrf: csrf } });
+  const add = (folder: string) => request(url, "/agents/s1/scopes", { cookie, form: { folder, _csrf: csrf } });
+  const flash = async () => (await request(url, "/agents/s1", { cookie })).text;
+
+  await add("a-plain-file");
+  assert.match(await flash(), /a file, not a folder/);
+  await add("trashed-fold");
+  assert.match(await flash(), /in the trash/);
+  await add("my-drive-root");
+  assert.match(await flash(), /Drive root/);
+  await add("does-not-exist");
+  assert.match(await flash(), /cannot find/);
+  await add("https://drive.google.com/drive/folders/scope-F-0001");
+  assert.deepEqual(store.getScopes("s1").map((s) => [s.folderId, s.folderName, s.isPrimary]), [["scope-F-0001", "Project F", true]]);
+  await add("shared-noparent");
+  assert.equal(store.getScopes("s1").length, 2);
+});
+
+test("a hostile folder name renders inert on the agent and browse pages", async () => {
+  const { url } = await boot();
+  const { cookie, csrf } = await login(url);
+  await request(url, "/agents", { cookie, form: { slug: "x1", name: "X", _csrf: csrf } });
+  await request(url, "/agents/x1/scopes", { cookie, form: { folder: "evil-folder1", _csrf: csrf } });
+  // The fake does not alias `root` inside a parents query; use the real ID.
+  for (const path of ["/agents/x1", "/agents/x1/browse?parent=my-drive-root"]) {
+    const text = (await request(url, path, { cookie })).text;
+    assert.doesNotMatch(text, /<img src=x/);
+    assert.match(text, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  }
+});
+
+test("browse rejects a parent that is not an ID", async () => {
+  const { url } = await boot();
+  const { cookie, csrf } = await login(url);
+  await request(url, "/agents", { cookie, form: { slug: "b1", name: "B", _csrf: csrf } });
+  assert.equal((await request(url, `/agents/b1/browse?parent=${encodeURIComponent("x' or '1")}`, { cookie })).status, 400);
+});
+
+test("unconfine needs confirmation and zero scopes; default cannot be scoped or archived", async () => {
+  const { url, store } = await boot();
+  const { cookie, csrf } = await login(url);
+  await request(url, "/agents", { cookie, form: { slug: "u1", name: "U", _csrf: csrf } });
+  await request(url, "/agents/u1/scopes", { cookie, form: { folder: "scope-F-0001", _csrf: csrf } });
+  await request(url, "/agents/u1/unconfine", { cookie, form: { confirm: "yes", _csrf: csrf } });
+  assert.equal(store.getAgent("u1")?.scoped, true);
+  await request(url, "/agents/u1/scopes/scope-F-0001/remove", { cookie, form: { _csrf: csrf } });
+  await request(url, "/agents/u1/unconfine", { cookie, form: { _csrf: csrf } });
+  assert.equal(store.getAgent("u1")?.scoped, true);
+  await request(url, "/agents/u1/unconfine", { cookie, form: { confirm: "yes", _csrf: csrf } });
+  assert.equal(store.getAgent("u1")?.scoped, false);
+
+  await request(url, "/agents/default/scopes", { cookie, form: { folder: "scope-F-0001", _csrf: csrf } });
+  assert.equal(store.getScopes("default").length, 0);
+  await request(url, "/agents/default/archive", { cookie, form: { _csrf: csrf } });
+  assert.equal(store.getAgent("default")?.archivedAt, null);
+});
+
+test("the audit page escapes what it shows", async () => {
+  const { url, audit } = await boot();
+  audit!.tool({ slug: "default" }, "readDocument", "deny", "outside", ["<script>x</script>"]);
+  const { cookie } = await login(url);
+  const text = (await request(url, "/audit?decision=deny", { cookie })).text;
+  assert.doesNotMatch(text, /<script>x/);
+  assert.match(text, /&lt;script&gt;x/);
+});
+
+test("collision warning when two credentialed agents share a tool", async () => {
+  const { url, store } = await boot();
+  const { cookie, csrf } = await login(url);
+  await request(url, "/agents", { cookie, form: { slug: "c1", name: "C", _csrf: csrf } });
+  await request(url, "/agents/c1/grants", { cookie, form: { g: "calendar:read", _csrf: csrf } });
+  assert.doesNotMatch((await request(url, "/", { cookie })).text, /both expose/);
+  await request(url, "/agents/c1/tokens", { cookie, form: { _csrf: csrf } });
+  assert.match((await request(url, "/", { cookie })).text, /default and c1 both expose listEvents/);
+  assert.ok(store.listTokens("c1").length === 1);
+});
+
+test("without a database every page explains the error", async () => {
+  const { url } = await boot({ store: null });
+  const reply = await request(url, "/login");
+  assert.equal(reply.status, 503);
+  assert.match(reply.text, /disk on fire/);
+});
