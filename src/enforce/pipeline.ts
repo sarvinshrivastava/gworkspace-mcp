@@ -11,7 +11,8 @@ import { FOLDER_MIME, type DriveClient } from "../drive/client.js";
 import { CALENDAR_TOOLS } from "../policy/derive.js";
 import type { AgentContext } from "../policy/auth.js";
 import { MAX_RESOURCES } from "../policy/store.js";
-import { ALL_AGENT_GUARDS, EVENT_CONTENT_FIELDS, ID_RE } from "./guards.js";
+import { ALL_AGENT_GUARDS, EVENT_TIME_ONLY_KEYS, ID_RE } from "./guards.js";
+import { errorMessage } from "../errors.js";
 import type { DenyReason, ScopeResolver, Verdict } from "./resolver.js";
 import { scopedSearchDriveFiles, type SubtreeCache } from "./search.js";
 
@@ -135,7 +136,7 @@ export async function planCall(
     tool === "updateEvent" &&
     typeof args.eventId === "string" &&
     args.eventId &&
-    EVENT_CONTENT_FIELDS.some((f) => args[f] !== undefined)
+    Object.keys(args).some((key) => args[key] !== undefined && !EVENT_TIME_ONLY_KEYS.has(key))
   ) {
     const drive = deps.drive();
     if (!drive) return deny("event_unverifiable", []);
@@ -143,8 +144,10 @@ export async function planCall(
     try {
       // null: no such event — the upstream reports that in its own words.
       guests = await drive.eventGuests("primary", args.eventId);
-    } catch {
+    } catch (error) {
       // Fail closed, transient or not: an unchecked event may have guests.
+      // Logged, because a permanent cause (no Calendar scope) looks the same.
+      console.error(`[guard] could not read an event's guests: ${errorMessage(error)}`);
       return deny("event_unverifiable", []);
     }
     if (guests?.length) return deny("event_has_guests", []);

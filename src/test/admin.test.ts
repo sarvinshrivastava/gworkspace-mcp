@@ -370,6 +370,7 @@ test("verifyPassword never throws on hashes scrypt would reject", async () => {
   assert.equal(usableHash(`scrypt$1000$8$1$${salt}$${key}`), false);
   assert.equal(usableHash(`scrypt$16384$8$9$${salt}$${key}`), false);
   assert.equal(usableHash(`scrypt$2$131072$4$${salt}$${key}`), false);
+  assert.equal(usableHash(`scrypt$16384$8$1$${salt}$=`), false);
   assert.equal(usableHash("plain"), false);
 });
 

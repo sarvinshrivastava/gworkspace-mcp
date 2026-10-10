@@ -261,10 +261,13 @@ test("updateEvent: an event with guests keeps its words; its time may move", asy
   assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { eventId: "with-guests", start: { dateTime: "2026-10-11T10:00:00Z" } }, deps)), "relay");
   assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { eventId: "just-me", description: "notes" }, deps)), "relay");
   assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { eventId: "missing", summary: "x" }, deps)), "relay");
+  // Any non-time field triggers the check, including ones a later upstream adds.
+  assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { eventId: "with-guests", colorId: "5" }, deps)), "event_has_guests");
+  assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { eventId: "with-guests", calendarId: "primary", end: { date: "2026-10-12" } }, deps)), "relay");
   drive.eventError = retryable();
-  assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { eventId: "just-me", summary: "x" }, deps)), "event_unverifiable");
+  assert.equal(reasonOf((await quietly(() => planCall(unconfined, "updateEvent", { eventId: "just-me", summary: "x" }, deps))).result), "event_unverifiable");
   drive.eventError = new Error("403 forbidden");
-  assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { eventId: "just-me", summary: "x" }, deps)), "event_unverifiable");
+  assert.equal(reasonOf((await quietly(() => planCall(unconfined, "updateEvent", { eventId: "just-me", summary: "x" }, deps))).result), "event_unverifiable");
   // No eventId: nothing to look up; the upstream's schema rejects the call.
   assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { summary: "x" }, deps)), "relay");
 });

@@ -62,5 +62,15 @@ export const ALL_AGENT_GUARDS: Record<string, (args: Record<string, unknown>) =>
   quickAddEvent: primaryOnly(quickAddGuard),
 };
 
-/** updateEvent fields whose text reaches every existing guest's calendar. */
-export const EVENT_CONTENT_FIELDS = ["summary", "description", "location"] as const;
+/**
+ * updateEvent arguments that only move an event or address it. Anything else —
+ * summary, description, location, or whatever field a later upstream adds —
+ * may carry text to the event's guests, so an allowlist fails closed.
+ */
+export const EVENT_TIME_ONLY_KEYS: ReadonlySet<string> = new Set([
+  "calendarId",
+  "eventId",
+  "start",
+  "end",
+  "sendUpdates",
+]);

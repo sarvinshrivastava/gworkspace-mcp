@@ -145,6 +145,7 @@ export async function verifyPassword(password: string, encoded: string): Promise
 export function usableHash(encoded: string): boolean {
   const m = HASH_RE.exec(encoded);
   if (!m) return false;
+  if (!Buffer.from(m[5]!, "base64").length) return false;
   const [N, r, p] = [Number(m[1]), Number(m[2]), Number(m[3])];
   // Parameters scrypt would reject, or that would make one login attempt a
   // memory bomb: N a power of two, r and p small, and the whole working set
