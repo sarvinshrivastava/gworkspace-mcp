@@ -115,3 +115,15 @@ test("a failed refresh never repeats the response body", async () => {
     return true;
   });
 });
+
+test("eventGuests leaves out this account and is null for a missing event", async () => {
+  const { impl, calls } = fakeFetch((url) => {
+    if (url.includes("oauth2")) return tokenOk();
+    if (url.includes("/events/missing")) return json(404, {});
+    return json(200, { attendees: [{ email: "me@x.com", self: true }, { email: "guest@y.com" }] });
+  });
+  const drive = new DriveClient(creds, impl);
+  assert.deepEqual(await drive.eventGuests("primary", "evt1"), ["guest@y.com"]);
+  assert.equal(await drive.eventGuests("primary", "missing"), null);
+  assert.match(calls.at(-2)!.url, /calendar\/v3\/calendars\/primary\/events\/evt1/);
+});

@@ -130,6 +130,8 @@ jobs:
           # registers it twice (docs and sheets) and registerTool throws on a
           # duplicate name. It is no longer in any grant's tool map, so it cannot
           # reach registerTool at all: three names in, two tools out.
+          # --network host: requests to the admin port come from 127.0.0.1,
+          # which the image deliberately does not trust; allow it for CI only.
           run_smoke() {
             local name="$1"; shift
             docker run -d --name "$name" --network host \
@@ -140,6 +142,7 @@ jobs:
               -e SECRETS_MANAGER_URL=http://127.0.0.1:8890 \
               -e SECRETS_MANAGER_TOKEN=ci \
               -e PORT=3014 -e ADMIN_PORT=3015 \
+              -e ADMIN_ALLOWED_SOURCES=127.0.0.1 \
               "$@" "$IMAGE" > /dev/null
           }
           wait_healthy() {

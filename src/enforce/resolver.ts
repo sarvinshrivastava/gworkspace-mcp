@@ -29,6 +29,8 @@ export type DenyReason =
   | "initial_data"
   | "too_large"
   | "quickadd_guest"
+  | "calendar_not_primary"
+  | "event_has_guests"
   | "not_enabled"
   | "unmapped";
 

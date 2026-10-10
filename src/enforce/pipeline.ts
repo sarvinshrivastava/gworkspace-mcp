@@ -11,7 +11,7 @@ import { FOLDER_MIME, type DriveClient } from "../drive/client.js";
 import { CALENDAR_TOOLS } from "../policy/derive.js";
 import type { AgentContext } from "../policy/auth.js";
 import { MAX_RESOURCES } from "../policy/store.js";
-import { ALL_AGENT_GUARDS, ID_RE } from "./guards.js";
+import { ALL_AGENT_GUARDS, EVENT_CONTENT_FIELDS, ID_RE } from "./guards.js";
 import type { DenyReason, ScopeResolver, Verdict } from "./resolver.js";
 import { scopedSearchDriveFiles, type SubtreeCache } from "./search.js";
 
@@ -88,6 +88,10 @@ export function denyMessage(reason: DenyReason, id?: string): string {
       return "This agent's folder tree is too large to search (over 500 folders) — pass a folderId deeper in the tree.";
     case "quickadd_guest":
       return "quickAddEvent cannot add guests — remove the e-mail address.";
+    case "calendar_not_primary":
+      return "Denied: events can only be written to this account's own calendar (calendarId \"primary\").";
+    case "event_has_guests":
+      return "Denied: that event has guests, so its title, description and location cannot be changed here. Changing its time is allowed.";
     case "not_enabled":
     case "unmapped":
       return "Denied: this tool is not enabled for this agent.";
@@ -119,6 +123,22 @@ export async function planCall(
     if ("deny" in result) return deny(result.deny, []);
     args = result.args;
     mutated = result.mutated;
+  }
+
+  // 1b. updateEvent is a PATCH: guests already on the event stay, and new text
+  // syncs to their calendars even with sendUpdates "none". So an event with
+  // guests keeps its words; only its time may move.
+  if (tool === "updateEvent" && EVENT_CONTENT_FIELDS.some((f) => args[f] !== undefined)) {
+    const drive = deps.drive();
+    if (!drive) return deny("drive_error", []);
+    let guests: string[] | null;
+    try {
+      // null: no such event — the upstream reports that in its own words.
+      guests = await drive.eventGuests("primary", String(args.eventId ?? ""));
+    } catch {
+      return deny("drive_error", []);
+    }
+    if (guests?.length) return deny("event_has_guests", []);
   }
 
   // 2. Calendar is never folder-scoped. 3. Unconfined agents relay as before —

@@ -74,6 +74,9 @@ export class FakeDrive extends DriveClient {
   serverPageCap = Number.POSITIVE_INFINITY;
   /** Delay per listFiles call, to exercise budgets. */
   listDelayMs = 0;
+  /** eventId → guest e-mails (without this account); absent = no such event. */
+  events = new Map<string, string[]>();
+  eventError: Error | null = null;
 
   constructor() {
     super({ clientId: "x", clientSecret: "y", refreshToken: "z" });
@@ -105,6 +108,11 @@ export class FakeDrive extends DriveClient {
     return f
       ? { id: f.id, name: f.name, mimeType: f.mimeType, parents: [...f.parents], trashed: f.trashed }
       : null;
+  }
+
+  override async eventGuests(_calendarId: string, eventId: string): Promise<string[] | null> {
+    if (this.eventError) throw this.eventError;
+    return this.events.get(eventId) ?? null;
   }
 
   override async listFiles(p: {

@@ -18,7 +18,9 @@ services:
     # loopback only, for an SSH tunnel:
     #   ssh -N -L 3015:127.0.0.1:3015 root@<vps>   then   http://localhost:3015
     # Other containers on `shared` can still reach :3015 by name; the app refuses
-    # any source address that is not loopback or a bridge gateway.
+    # any source address that is not a bridge gateway (where host traffic
+    # arrives). Not even loopback: inside the container that is the upstream
+    # child. ADMIN_ALLOWED_SOURCES adds exact addresses if ever needed.
     expose:
       - '3014'
     ports:

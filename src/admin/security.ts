@@ -73,8 +73,11 @@ export function makeAllowedSources(
   let cached: { at: number; set: Set<string> } | null = null;
   return () => {
     if (cached && now() - cached.at < 60_000) return cached.set;
-    const base = ["127.0.0.1", ...gatewaysFromRoute(net.routeText() ?? ""), ...firstHosts(net.interfaces()), ...extra];
-    const set = new Set<string>(["::1"]);
+    // Not loopback: inside the container that is the upstream child, which
+    // parses attacker-written documents and has no business on this port. Host
+    // traffic (the tunnel, docker-proxy) arrives from a bridge gateway.
+    const base = [...gatewaysFromRoute(net.routeText() ?? ""), ...firstHosts(net.interfaces()), ...extra];
+    const set = new Set<string>();
     for (const ip of base) {
       set.add(ip);
       if (/^\d+\.\d+\.\d+\.\d+$/.test(ip)) set.add(`::ffff:${ip}`);

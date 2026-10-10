@@ -235,3 +235,28 @@ test("unconfined: createFolder flushes the subtree; reads name their file", asyn
   const read = await planCall(unconfined, "readDocument", { documentId: "doc-outside1" }, deps);
   assert.deepEqual((read as { resources: string[] }).resources, ["doc-outside1"]);
 });
+
+test("calendar writes go to the primary calendar only, for every agent", async () => {
+  const { deps } = setup();
+  for (const tool of ["createEvent", "updateEvent", "quickAddEvent"]) {
+    const plan = await quietly(() => planCall(unconfined, tool, { calendarId: "attacker@group.calendar.google.com", eventId: "e1", text: "x" }, deps));
+    assert.equal(reasonOf(plan.result), "calendar_not_primary", tool);
+  }
+  assert.equal(reasonOf(await planCall(unconfined, "createEvent", { summary: "s", calendarId: "primary" }, deps)), "relay");
+  assert.equal(reasonOf(await planCall(unconfined, "createEvent", { summary: "s" }, deps)), "relay");
+  // Reading another calendar is not an outbound channel.
+  assert.equal(reasonOf(await planCall(unconfined, "listEvents", { calendarId: "team@group.calendar.google.com" }, deps)), "relay");
+});
+
+test("updateEvent: an event with guests keeps its words; its time may move", async () => {
+  const { deps, drive } = setup();
+  drive.events.set("with-guests", ["stranger@example.com"]);
+  drive.events.set("just-me", []);
+  assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { eventId: "with-guests", description: "secret" }, deps)), "event_has_guests");
+  assert.equal(reasonOf(await planCall(confined(), "updateEvent", { eventId: "with-guests", summary: "x" }, deps)), "event_has_guests");
+  assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { eventId: "with-guests", start: { dateTime: "2026-10-11T10:00:00Z" } }, deps)), "relay");
+  assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { eventId: "just-me", description: "notes" }, deps)), "relay");
+  assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { eventId: "missing", summary: "x" }, deps)), "relay");
+  drive.eventError = retryable();
+  assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { eventId: "just-me", summary: "x" }, deps)), "drive_error");
+});

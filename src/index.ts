@@ -157,8 +157,10 @@ async function main() {
   passwordHash = hash;
   if (!hash) console.warn("[admin] no DASHBOARD_ADMIN_PASSWORD_HASH in the vault — dashboard login is disabled");
 
-  // Nothing reads the vault after boot, and this process spawns a child that
-  // parses untrusted document text. Drop the capability once it is spent.
+  // Nothing reads the vault after boot. This removes the token from this
+  // process's view and from anything it spawns later — NOT from
+  // /proc/<pid>/environ, which keeps the original block and is readable by the
+  // child (same uid). Bounding that needs the vault-folder migration (spec D8).
   delete process.env.SECRETS_MANAGER_TOKEN;
   config.vault.token = "";
 

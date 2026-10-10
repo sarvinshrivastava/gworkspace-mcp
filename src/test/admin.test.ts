@@ -124,7 +124,9 @@ test("allowed sources recompute after 60 s and survive no /proc/net/route", () =
   };
   const allowed = makeAllowedSources(["192.0.2.9"], { interfaces: () => ifaces, routeText: () => null }, () => now);
   const first = allowed();
-  assert.ok(first.has("127.0.0.1") && first.has("::1") && first.has("172.18.0.1") && first.has("::ffff:172.18.0.1") && first.has("192.0.2.9"));
+  assert.ok(first.has("172.18.0.1") && first.has("::ffff:172.18.0.1") && first.has("192.0.2.9"));
+  // Loopback is the child's address, not an admin's.
+  assert.ok(!first.has("127.0.0.1") && !first.has("::1"));
   ifaces = { eth1: [{ address: "10.5.0.3", netmask: "255.255.255.0", family: "IPv4", internal: false }] };
   assert.ok(!allowed().has("10.5.0.1"));
   now += 60_001;

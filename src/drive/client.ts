@@ -23,6 +23,7 @@ export const FOLDER_MIME = "application/vnd.google-apps.folder";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const DRIVE_URL = "https://www.googleapis.com/drive/v3/files";
+const CALENDAR_URL = "https://www.googleapis.com/calendar/v3/calendars";
 const RATE_LIMIT_REASONS = new Set(["rateLimitExceeded", "userRateLimitExceeded"]);
 
 /**
@@ -143,6 +144,22 @@ export class DriveClient {
       parents: Array.isArray(body.parents) ? body.parents.map(String) : [],
       trashed: body.trashed === true,
     };
+  }
+
+  /**
+   * The guests of one calendar event, without this account itself. Null when
+   * the event does not exist. Same credential and token as Drive: the grant
+   * covers Calendar.
+   */
+  async eventGuests(calendarId: string, eventId: string, signal?: AbortSignal): Promise<string[] | null> {
+    const params = new URLSearchParams({ fields: "attendees(email,self)" });
+    const res = await this.request(
+      `${CALENDAR_URL}/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?${params}`,
+      signal,
+    );
+    if (res.status === 404) return null;
+    const body = (await res.json()) as { attendees?: Array<{ email?: string; self?: boolean }> };
+    return (body.attendees ?? []).filter((a) => !a.self).map((a) => String(a.email ?? ""));
   }
 
   async listFiles(p: {

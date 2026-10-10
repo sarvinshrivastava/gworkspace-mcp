@@ -9,7 +9,7 @@
 
 export type GuardResult =
   | { args: Record<string, unknown>; mutated: boolean }
-  | { deny: "quickadd_guest" };
+  | { deny: "quickadd_guest" | "calendar_not_primary" };
 
 export const ID_RE = /^[A-Za-z0-9_-]{10,128}$/;
 export const EMAIL_RE = /[^\s@<>()]+@[^\s@<>()]+\.[^\s@<>()]+/;
@@ -44,8 +44,23 @@ export function quickAddGuard(args: Record<string, unknown>): GuardResult {
   return { args: { ...args, sendUpdates: "none" }, mutated: forcedNone(args.sendUpdates) };
 }
 
+/**
+ * Writes go to this account's own calendar only. Any other calendarId is a
+ * calendar someone may have shared with this account with edit rights — and
+ * an event written there, description and all, is theirs to read.
+ */
+function primaryOnly(guard: (args: Record<string, unknown>) => GuardResult) {
+  return (args: Record<string, unknown>): GuardResult =>
+    args.calendarId === undefined || args.calendarId === "primary"
+      ? guard(args)
+      : { deny: "calendar_not_primary" };
+}
+
 export const ALL_AGENT_GUARDS: Record<string, (args: Record<string, unknown>) => GuardResult> = {
-  createEvent: stripAttendees,
-  updateEvent: stripAttendees,
-  quickAddEvent: quickAddGuard,
+  createEvent: primaryOnly(stripAttendees),
+  updateEvent: primaryOnly(stripAttendees),
+  quickAddEvent: primaryOnly(quickAddGuard),
 };
+
+/** updateEvent fields whose text reaches every existing guest's calendar. */
+export const EVENT_CONTENT_FIELDS = ["summary", "description", "location"] as const;
