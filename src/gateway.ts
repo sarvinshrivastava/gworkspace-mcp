@@ -1,5 +1,5 @@
 /**
- * The MCP side: /healthz and POST /mcp on :3014.
+ * The MCP side: /healthz, POST /mcp and POST /internal/housekeeping on :3014.
  *
  * Stateless as before — one McpServer per request — so building it per AGENT
  * costs nothing extra. Each agent's tools/list holds only its enabled tools,
@@ -16,6 +16,8 @@ import { DriveError } from "./drive/client.js";
 import { denyMessage, planCall, type PipelineDeps } from "./enforce/pipeline.js";
 import { ScopeTooLarge } from "./enforce/search.js";
 import { errorMessage } from "./errors.js";
+import type { HousekeepingResult } from "./housekeeping.js";
+import { internalGuard } from "./internal-auth.js";
 import type { AgentContext, Authenticator } from "./policy/auth.js";
 import { enabledTools } from "./policy/derive.js";
 import { describeResult, type UpstreamState } from "./upstream.js";
@@ -29,6 +31,10 @@ export type GatewayDeps = {
   /** False until the vault has answered and the child is up. */
   ready: () => boolean;
   health: () => Record<string, unknown>;
+  /** A getter: null until the policy store has opened (and in degraded mode). */
+  housekeeping: () => (() => Promise<HousekeepingResult>) | null;
+  /** pipeline-runner's bearer for /internal/*; "" when the vault has none. */
+  plrToken: () => string;
 };
 
 const fail = (why: string): CallToolResult => ({
@@ -151,6 +157,23 @@ export function createMcpApp(deps: GatewayDeps): express.Express {
       upstreamTools: deps.upstream.upstreamToolCount,
       ...deps.health(),
     });
+  });
+
+  // pipeline-runner's daily call. Gated on the store only, not on ready():
+  // ready waits for Google, and a prune and a backup are DB-only, so a Google
+  // outage must not stop them. No body is read.
+  app.post("/internal/housekeeping", internalGuard(deps.plrToken), async (_req, res) => {
+    const housekeeping = deps.housekeeping();
+    if (!housekeeping) {
+      res.status(503).json({ error: "no_store" });
+      return;
+    }
+    try {
+      res.json(await housekeeping());
+    } catch (error) {
+      console.error(`[db] housekeeping failed: ${errorMessage(error)}`);
+      res.status(500).json({ error: errorMessage(error) });
+    }
   });
 
   app.post("/mcp", (req, res, next) => {

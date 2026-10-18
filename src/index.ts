@@ -19,20 +19,21 @@
 
 import { createAdminApp } from "./admin/app.js";
 import { makeAllowedSources } from "./admin/security.js";
-import { Audit, DAY_MS } from "./audit.js";
+import { Audit } from "./audit.js";
 import { config, vaultFetch, vaultFetchOptional } from "./config.js";
 import { DriveClient } from "./drive/client.js";
 import { ScopeResolver } from "./enforce/resolver.js";
 import { SubtreeCache } from "./enforce/search.js";
 import { errorMessage } from "./errors.js";
 import { createMcpApp } from "./gateway.js";
+import { runHousekeeping, startHousekeeping, type HousekeepingResult } from "./housekeeping.js";
 import {
   makeAuthenticator,
   makeDegradedAuthenticator,
   type Authenticator,
 } from "./policy/auth.js";
 import { DEFAULT_GRANTS } from "./policy/derive.js";
-import { OpenError, backupDaily, openPolicyStore, type PolicyStore } from "./policy/store.js";
+import { OpenError, openPolicyStore, type PolicyStore } from "./policy/store.js";
 import {
   connectUpstream,
   describeResult,
@@ -44,6 +45,8 @@ import {
 let store: PolicyStore | null = null;
 let dbError: string | null = null;
 let audit: Audit | null = null;
+let housekeeping: (() => Promise<HousekeepingResult>) | null = null;
+let plrToken = "";
 let legacyToken = "";
 let passwordHash: string | null = null;
 let drive: DriveClient | null = null;
@@ -81,16 +84,9 @@ function openStore(): void {
   }
   audit = new Audit(store);
 
-  const housekeeping = () => {
-    audit?.prune();
-    if (store) {
-      backupDaily(store, config.backupDir).catch((error) =>
-        console.error(`[db] backup failed: ${errorMessage(error)}`),
-      );
-    }
-  };
-  housekeeping();
-  setInterval(housekeeping, DAY_MS).unref();
+  const deps = { audit, store, backupDir: config.backupDir };
+  housekeeping = () => runHousekeeping(deps);
+  startHousekeeping({ scheduler: config.housekeepingScheduler, run: housekeeping });
 }
 
 async function main() {
@@ -110,6 +106,8 @@ async function main() {
     upstream: upstreamState,
     ready: () => ready,
     health: () => ({ db: store !== null, auditErrors: audit?.errors ?? 0 }),
+    housekeeping: () => housekeeping,
+    plrToken: () => plrToken,
   });
 
   const adminApp = createAdminApp({
@@ -146,15 +144,20 @@ async function main() {
   // Concurrently: sequential fetches against a slow vault is n x (4 attempts x
   // 15s timeout + backoff), which outlasts both start_period and the deploy's
   // health wait.
-  const [token, clientId, clientSecret, tokenJson, hash] = await Promise.all([
+  const [token, clientId, clientSecret, tokenJson, hash, plr] = await Promise.all([
     vaultFetch("GWORKSPACE_MCP_TOKEN"),
     vaultFetch("GOOGLE_CLIENT_ID"),
     vaultFetch("GOOGLE_CLIENT_SECRET"),
     vaultFetch("GOOGLE_TOKEN_JSON"),
     vaultFetchOptional("DASHBOARD_ADMIN_PASSWORD_HASH"),
+    // Optional: without it /internal/* answers 503 and the in-process schedule
+    // (HOUSEKEEPING_SCHEDULER=internal) still runs. Read once, like the rest —
+    // adding the key later needs a restart.
+    vaultFetchOptional("GWORKSPACE_PLR_TOKEN"),
   ]);
   legacyToken = token;
   passwordHash = hash;
+  plrToken = plr;
   if (!hash) console.warn("[admin] no DASHBOARD_ADMIN_PASSWORD_HASH in the vault — dashboard login is disabled");
 
   // Nothing reads the vault after boot. This removes the token from this
