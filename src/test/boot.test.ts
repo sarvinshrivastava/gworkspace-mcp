@@ -112,6 +112,8 @@ test("startHousekeeping internal: the boot run plus a daily interval that runs i
         return RESULT;
       },
     });
+    // The boot run happens at once; the interval only after it.
+    assert.equal(runs, 1);
     assert.deepEqual(scheduled.map((s) => s.ms), [DAY_MS]);
     // The daily tick: a failure is logged, never an unhandled rejection.
     scheduled[0]!.fn();

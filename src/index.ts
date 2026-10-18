@@ -26,6 +26,7 @@ import { ScopeResolver } from "./enforce/resolver.js";
 import { SubtreeCache } from "./enforce/search.js";
 import { errorMessage } from "./errors.js";
 import { createMcpApp } from "./gateway.js";
+import { usablePlrToken } from "./internal-auth.js";
 import { runHousekeeping, startHousekeeping, type Housekeeping } from "./housekeeping.js";
 import {
   makeAuthenticator,
@@ -157,12 +158,9 @@ async function main() {
   ]);
   legacyToken = token;
   passwordHash = hash;
-  // A placeholder typed into the vault UI would be the only credential on a
-  // route one proxy hop from the internet: refuse it, so /internal/* says 503.
-  if (plr && plr.length < 32) {
+  plrToken = usablePlrToken(plr);
+  if (plr && !plrToken) {
     console.error("[internal] GWORKSPACE_PLR_TOKEN is shorter than 32 characters — ignored; /internal/* answers 503 until it is replaced");
-  } else {
-    plrToken = plr;
   }
   if (!plrToken && config.housekeepingScheduler === "external") {
     console.error("[db] HOUSEKEEPING_SCHEDULER=external but no usable GWORKSPACE_PLR_TOKEN: housekeeping runs at boot only until the key is set and the service restarted");

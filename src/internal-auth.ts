@@ -22,6 +22,17 @@ import type express from "express";
 const WINDOW_MS = 60_000;
 const MAX_PER_WINDOW = 10;
 
+/**
+ * The vault's GWORKSPACE_PLR_TOKEN, or "" when it is unusable. A placeholder
+ * typed into the vault UI would be the only credential on a route one proxy
+ * hop from the internet, so anything under 32 characters (after trimming the
+ * whitespace a header value could never carry) counts as not configured.
+ */
+export function usablePlrToken(raw: string): string {
+  const token = raw.trim();
+  return token.length >= 32 ? token : "";
+}
+
 const digest = (value: string) => createHash("sha256").update(value).digest();
 
 export function internalGuard(

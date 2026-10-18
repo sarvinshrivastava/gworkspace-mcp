@@ -320,7 +320,7 @@ test("an error past the route is a JSON-RPC internal error without a stack", asy
 // ---------------------------------------------------------------------------
 // POST /internal/housekeeping — pipeline-runner's daily call.
 
-const PLR = "plr-token-0123456789";
+const PLR = "plr-token-0123456789-0123456789-0123";
 const RESULT: HousekeepingResult = { pruned: 2, backup: "/state/backups/policy-3.sqlite" };
 
 function spyHousekeeping(impl: Housekeeping = async () => RESULT) {
@@ -395,8 +395,11 @@ test("internal: a proxied request is 404, whatever the bearer", async () => {
 test("internal: a case variant of the path is 404", async () => {
   const spy = spyHousekeeping();
   const { url } = await boot({ housekeeping: spy, plrToken: PLR });
-  for (const path of ["/INTERNAL/housekeeping", "/Internal/housekeeping", "/internal/HOUSEKEEPING", "/internal/housekeeping/"]) {
-    assert.equal((await internal(url, { bearer: PLR, path })).status, 404, path);
+  for (const path of ["/INTERNAL/housekeeping", "/Internal/housekeeping", "/internal/HOUSEKEEPING", "/internal/housekeeping/", "/internal/other"]) {
+    const reply = await internal(url, { bearer: PLR, path });
+    assert.equal(reply.status, 404, path);
+    // The guard's or the mount's own bare 404, never Express's HTML page.
+    assert.equal(reply.body, "", path);
   }
   assert.equal(spy.calls, 0);
 });

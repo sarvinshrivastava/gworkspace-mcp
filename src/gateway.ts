@@ -181,6 +181,11 @@ export function createMcpApp(deps: GatewayDeps): express.Express {
       res.status(500).json({ error: "housekeeping_failed" });
     }
   });
+  // Ends the mount: an authenticated request for anything else under
+  // /internal stops here rather than reaching whatever is registered later.
+  internal.use((_req, res) => {
+    res.status(404).end();
+  });
   app.use(
     "/internal",
     internalGuard(deps.plrToken, {

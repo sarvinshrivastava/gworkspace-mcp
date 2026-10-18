@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import express from "express";
 
-import { internalGuard } from "../internal-auth.js";
+import { internalGuard, usablePlrToken } from "../internal-auth.js";
 import { listen, quietly } from "./helpers.js";
 
 const servers: Server[] = [];
@@ -45,4 +45,12 @@ test("the once-a-minute failure log comes back after the window", async () => {
     await call("wrong");
   });
   assert.equal(logs.filter((l) => l.includes("[internal] rejected POST /internal/x")).length, 2);
+});
+
+test("usablePlrToken: under 32 characters, or blank, is not configured", () => {
+  assert.equal(usablePlrToken(""), "");
+  assert.equal(usablePlrToken("a".repeat(31)), "");
+  assert.equal(usablePlrToken(`${"a".repeat(31)}\n`), "");
+  assert.equal(usablePlrToken("a".repeat(32)), "a".repeat(32));
+  assert.equal(usablePlrToken(` ${"a".repeat(48)}\n`), "a".repeat(48));
 });
