@@ -1,5 +1,5 @@
 /**
- * The MCP side: /healthz and POST /mcp on :3014.
+ * The MCP side: /healthz, POST /mcp and POST /internal/housekeeping on :3014.
  *
  * Stateless as before — one McpServer per request — so building it per AGENT
  * costs nothing extra. Each agent's tools/list holds only its enabled tools,
@@ -16,6 +16,8 @@ import { DriveError } from "./drive/client.js";
 import { denyMessage, planCall, type PipelineDeps } from "./enforce/pipeline.js";
 import { ScopeTooLarge } from "./enforce/search.js";
 import { errorMessage } from "./errors.js";
+import type { Housekeeping } from "./housekeeping.js";
+import { internalGuard } from "./internal-auth.js";
 import type { AgentContext, Authenticator } from "./policy/auth.js";
 import { enabledTools } from "./policy/derive.js";
 import { describeResult, type UpstreamState } from "./upstream.js";
@@ -29,6 +31,10 @@ export type GatewayDeps = {
   /** False until the vault has answered and the child is up. */
   ready: () => boolean;
   health: () => Record<string, unknown>;
+  /** A getter: null until the policy store has opened (and in degraded mode). */
+  housekeeping: () => Housekeeping | null;
+  /** pipeline-runner's bearer for /internal/*; "" when the vault has none. */
+  plrToken: () => string;
 };
 
 const fail = (why: string): CallToolResult => ({
@@ -152,6 +158,41 @@ export function createMcpApp(deps: GatewayDeps): express.Express {
       ...deps.health(),
     });
   });
+
+  // pipeline-runner's daily call. Gated on the store only, not on ready():
+  // ready waits for Google, and a prune and a backup are DB-only, so a Google
+  // outage must not stop them. No body is read.
+  // Its own router, case-sensitive and strict, so /internal/HOUSEKEEPING and
+  // /internal/housekeeping/ are not this route either (the guard already
+  // refuses a case variant of the prefix).
+  const internal = express.Router({ caseSensitive: true, strict: true });
+  internal.post("/housekeeping", async (_req, res) => {
+    const housekeeping = deps.housekeeping();
+    if (!housekeeping) {
+      res.status(503).json({ error: "no_store" });
+      return;
+    }
+    try {
+      res.json(await housekeeping());
+    } catch (error) {
+      // The detail stays in this log: the caller only needs the status to
+      // retry and page, and it keeps run output that may travel further.
+      console.error(`[db] housekeeping failed: ${errorMessage(error)}`);
+      res.status(500).json({ error: "housekeeping_failed" });
+    }
+  });
+  // Ends the mount: an authenticated request for anything else under
+  // /internal stops here rather than reaching whatever is registered later.
+  internal.use((_req, res) => {
+    res.status(404).end();
+  });
+  app.use(
+    "/internal",
+    internalGuard(deps.plrToken, {
+      onReject: (source) => deps.audit()?.authFailure(source, "internal_bad_bearer"),
+    }),
+    internal,
+  );
 
   app.post("/mcp", (req, res, next) => {
     // Before boot finishes there is no legacy bearer and no tool list; an

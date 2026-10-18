@@ -138,6 +138,29 @@ test("DEFAULT_GRANTS derive exactly today's 20 tools", () => {
   assert.deepEqual([...deriveTools(DEFAULT_GRANTS)].sort(), fromCompose.split(",").sort());
 });
 
+test("compose publishes MCP and admin on host loopback only", () => {
+  // The image build stage has no compose file; the source checkout does.
+  if (!existsSync("docker-compose.yml")) return;
+  const compose = readFileSync("docker-compose.yml", "utf8");
+  // No YAML dependency: slice the service block, then its ports list.
+  const start = compose.search(/^  gworkspace-mcp:\n/m);
+  assert.ok(start >= 0, "no gworkspace-mcp service block");
+  const rest = compose.slice(start + 1);
+  const next = rest.search(/^  \S/m);
+  const service = next < 0 ? rest : rest.slice(0, next);
+  const portsAt = service.search(/^    ports:\n/m);
+  assert.ok(portsAt >= 0, "no ports: in the service block");
+  const afterPorts = service.slice(portsAt).split("\n").slice(1);
+  const end = afterPorts.findIndex((line) => line.trim() !== "" && !/^ {5,}/.test(line));
+  const block = (end < 0 ? afterPorts : afterPorts.slice(0, end)).join("\n");
+  // Any quoting, so a double-quoted or bare entry cannot slip past.
+  const entries = [...block.matchAll(/^\s*-\s*['"]?([^'"\s]+)['"]?\s*$/gm)].map((m) => m[1]!);
+  assert.equal(entries.length, block.split("\n").filter((l) => /^\s*-/.test(l)).length);
+  // 3014 is the nginx vhost gworkspace-mcp.vps's upstream; 3017 the admin tunnel.
+  assert.deepEqual(entries.sort(), ["127.0.0.1:3014:3014", "127.0.0.1:3017:3015"]);
+  assert.ok(entries.every((e) => e.startsWith("127.0.0.1:")));
+});
+
 test("calendar-only grants derive 4 tools", () => {
   const tools = deriveTools([
     { area: "calendar", op: "read" },

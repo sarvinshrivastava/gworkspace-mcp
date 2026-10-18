@@ -20,6 +20,13 @@ const envList = (key: string): string[] =>
     .map((s) => s.trim())
     .filter(Boolean);
 
+const oneOf = <T extends string>(key: string, allowed: readonly T[], fallback: T): T => {
+  const value = env(key, fallback);
+  if (!(allowed as readonly string[]).includes(value))
+    throw new Error(`FATAL: ${key} must be one of ${allowed.join(", ")}, got "${value}"`);
+  return value as T;
+};
+
 export const config = {
   port: Number(env("PORT", "3014")),
 
@@ -29,6 +36,13 @@ export const config = {
   /** The policy database, on a named volume. Holds hashes only, no secrets. */
   dbPath: env("DB_PATH", "/state/gworkspace-v2.sqlite"),
   backupDir: env("BACKUP_DIR", "/state/backups"),
+
+  /**
+   * Who schedules the daily audit prune and DB backup after the boot run:
+   * `internal` (a 24 h interval here) or `external` (pipeline-runner calls
+   * POST /internal/housekeeping).
+   */
+  housekeepingScheduler: oneOf("HOUSEKEEPING_SCHEDULER", ["internal", "external"] as const, "internal"),
 
   /** Extra exact source addresses allowed on the admin port, comma-separated. */
   adminAllowedSources: envList("ADMIN_ALLOWED_SOURCES"),

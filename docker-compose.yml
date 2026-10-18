@@ -37,6 +37,11 @@ services:
       ADMIN_PORT: '3015'
       DB_PATH: '/state/gworkspace-v2.sqlite'
       BACKUP_DIR: '/state/backups'
+      # Who runs the daily audit prune + DB backup after the boot run:
+      # `internal` (a 24 h interval in-process) or `external` (pipeline-runner's
+      # job gworkspace-mcp/housekeeping calls POST /internal/housekeeping with
+      # the vault's GWORKSPACE_PLR_TOKEN). Anything else refuses to boot.
+      HOUSEKEEPING_SCHEDULER: '${HOUSEKEEPING_SCHEDULER:-internal}'
       CONFIG_HOME: '/data/config'
       TOKEN_DIR: '/data/config/google-docs-mcp'
       # This process only. The child gets its own budget (CHILD_HEAP_MB), set

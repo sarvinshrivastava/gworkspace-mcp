@@ -71,15 +71,18 @@ export class Audit {
     this.write({ kind: "auth", agent: null, tool: null, decision: "deny", reason, resources: [], source });
   }
 
-  prune(retentionDays = 90): void {
+  /** The number of rows removed; 0 when the prune failed (counted in `errors`). */
+  prune(retentionDays = 90): number {
     try {
       const removed = this.store.pruneAudit(this.now() - retentionDays * DAY_MS);
       if (removed) console.log(`[audit] pruned ${removed} rows older than ${retentionDays} days`);
+      return removed;
     } catch (error) {
       this.errors++;
       console.error(
         `[audit] prune failed: ${errorMessage(error)}`,
       );
+      return 0;
     }
   }
 }

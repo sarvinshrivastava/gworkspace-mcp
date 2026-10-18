@@ -6,6 +6,12 @@ import { Audit } from "../audit.js";
 import { ScopeResolver } from "../enforce/resolver.js";
 import { SubtreeCache } from "../enforce/search.js";
 import { createMcpApp, type GatewayDeps } from "../gateway.js";
+import {
+  runHousekeeping,
+  type Housekeeping,
+  type HousekeepingDeps,
+  type HousekeepingResult,
+} from "../housekeeping.js";
 import { makeAuthenticator } from "../policy/auth.js";
 import { DEFAULT_GRANTS } from "../policy/derive.js";
 import { mintToken } from "../policy/tokens.js";
@@ -26,7 +32,15 @@ import {
 const servers: Server[] = [];
 after(() => servers.forEach((s) => s.close()));
 
-async function boot(opts: { ready?: boolean; withUpstream?: boolean; withheld?: { scoped: Set<string>; all: Set<string> } } = {}) {
+async function boot(
+  opts: {
+    ready?: boolean;
+    withUpstream?: boolean;
+    withheld?: { scoped: Set<string>; all: Set<string> };
+    housekeeping?: Housekeeping | null;
+    plrToken?: string;
+  } = {},
+) {
   const store = tempStore();
   store.ensureDefaultAgent(DEFAULT_GRANTS);
   const audit = new Audit(store);
@@ -47,6 +61,8 @@ async function boot(opts: { ready?: boolean; withUpstream?: boolean; withheld?: 
     upstream,
     ready: () => ready,
     health: () => ({ db: true, auditErrors: audit.errors }),
+    housekeeping: () => opts.housekeeping ?? null,
+    plrToken: () => opts.plrToken ?? "",
   };
   const { url, server } = await listen(createMcpApp(deps));
   servers.push(server);
@@ -299,4 +315,179 @@ test("an error past the route is a JSON-RPC internal error without a stack", asy
   assert.equal(result.status, 500);
   assert.equal(result.body.error.code, -32603);
   assert.doesNotMatch(JSON.stringify(result.body), /boom/);
+});
+
+// ---------------------------------------------------------------------------
+// POST /internal/housekeeping — pipeline-runner's daily call.
+
+const PLR = "plr-token-0123456789-0123456789-0123";
+const RESULT: HousekeepingResult = { pruned: 2, backup: "/state/backups/policy-3.sqlite" };
+
+function spyHousekeeping(impl: Housekeeping = async () => RESULT) {
+  const spy = Object.assign(() => {
+    spy.calls++;
+    return impl();
+  }, { calls: 0 });
+  return spy;
+}
+
+async function internal(
+  url: string,
+  opts: { bearer?: string; path?: string; headers?: Record<string, string>; body?: string } = {},
+) {
+  const res = await fetch(`${url}${opts.path ?? "/internal/housekeeping"}`, {
+    method: "POST",
+    headers: {
+      ...(opts.bearer !== undefined ? { Authorization: `Bearer ${opts.bearer}` } : {}),
+      ...opts.headers,
+    },
+    body: opts.body,
+  });
+  const text = await res.text();
+  let body: any = text;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    // Not JSON (a bare 404).
+  }
+  return { status: res.status, body };
+}
+
+test("internal: no bearer is 401 and housekeeping does not run", async () => {
+  const spy = spyHousekeeping();
+  const { url } = await boot({ housekeeping: spy, plrToken: PLR });
+  const reply = await quietly(() => internal(url));
+  assert.equal(reply.result.status, 401);
+  assert.equal(spy.calls, 0);
+});
+
+test("internal: a wrong bearer is 401, audited once per minute per source", async () => {
+  const spy = spyHousekeeping();
+  const { url, store } = await boot({ housekeeping: spy, plrToken: PLR });
+  await quietly(async () => {
+    assert.equal((await internal(url, { bearer: "legacy-token" })).status, 401);
+    assert.equal((await internal(url, { bearer: "legacy-token" })).status, 401);
+  });
+  const rows = store.queryAudit({ limit: 10 }).filter((r) => r.reason === "internal_bad_bearer");
+  assert.equal(rows.length, 1);
+  assert.equal(spy.calls, 0);
+});
+
+test("internal: no configured token is 503, even for an empty bearer", async () => {
+  const spy = spyHousekeeping();
+  const { url } = await boot({ housekeeping: spy, plrToken: "" });
+  const reply = await internal(url, { bearer: "" });
+  assert.equal(reply.status, 503);
+  assert.deepEqual(reply.body, { error: "not_configured" });
+  assert.equal(spy.calls, 0);
+});
+
+test("internal: a proxied request is 404, whatever the bearer", async () => {
+  const spy = spyHousekeeping();
+  const { url } = await boot({ housekeeping: spy, plrToken: PLR });
+  for (const header of ["X-Forwarded-For", "X-Real-IP"]) {
+    const reply = await internal(url, { bearer: PLR, headers: { [header]: "203.0.113.9" } });
+    assert.equal(reply.status, 404, header);
+  }
+  assert.equal(spy.calls, 0);
+});
+
+test("internal: a case variant of the path is 404", async () => {
+  const spy = spyHousekeeping();
+  const { url } = await boot({ housekeeping: spy, plrToken: PLR });
+  for (const path of ["/INTERNAL/housekeeping", "/Internal/housekeeping", "/internal/HOUSEKEEPING", "/internal/housekeeping/", "/internal/other"]) {
+    const reply = await internal(url, { bearer: PLR, path });
+    assert.equal(reply.status, 404, path);
+    // The guard's or the mount's own bare 404, never Express's HTML page.
+    assert.equal(reply.body, "", path);
+  }
+  assert.equal(spy.calls, 0);
+});
+
+test("internal: runs while upstream is down (gated on the store, not ready)", async () => {
+  const spy = spyHousekeeping();
+  const { url } = await boot({ ready: false, withUpstream: false, housekeeping: spy, plrToken: PLR });
+  const reply = await internal(url, { bearer: PLR });
+  assert.equal(reply.status, 200);
+  assert.equal(spy.calls, 1);
+});
+
+test("internal: no store is 503 no_store", async () => {
+  const { url } = await boot({ housekeeping: null, plrToken: PLR });
+  const reply = await internal(url, { bearer: PLR });
+  assert.equal(reply.status, 503);
+  assert.deepEqual(reply.body, { error: "no_store" });
+});
+
+test("internal: the happy path answers the result", async () => {
+  const spy = spyHousekeeping();
+  const { url } = await boot({ housekeeping: spy, plrToken: PLR });
+  const reply = await internal(url, { bearer: PLR });
+  assert.equal(reply.status, 200);
+  assert.deepEqual(reply.body, RESULT);
+  assert.equal(spy.calls, 1);
+});
+
+test("internal: a failing housekeeping run is 500", async () => {
+  const spy = spyHousekeeping(async () => {
+    throw new Error("disk full");
+  });
+  const { url } = await boot({ housekeeping: spy, plrToken: PLR });
+  const reply = await quietly(() => internal(url, { bearer: PLR }));
+  assert.equal(reply.result.status, 500);
+  assert.deepEqual(reply.result.body, { error: "housekeeping_failed" });
+  assert.ok(reply.logs.some((l) => l.includes("housekeeping failed: disk full")));
+});
+
+test("internal: the 11th request in a minute is 429 before the bearer; one log line for 10 failures", async () => {
+  const spy = spyHousekeeping();
+  const { url } = await boot({ housekeeping: spy, plrToken: PLR });
+  const { result, logs } = await quietly(async () => {
+    const statuses: number[] = [];
+    for (let i = 0; i < 10; i++) statuses.push((await internal(url, { bearer: "wrong" })).status);
+    // The right bearer, still refused: the limit comes first.
+    statuses.push((await internal(url, { bearer: PLR })).status);
+    return statuses;
+  });
+  assert.deepEqual(result, [...Array(10).fill(401), 429]);
+  assert.equal(logs.filter((l) => l.includes("[internal] rejected")).length, 1);
+  assert.equal(spy.calls, 0);
+});
+
+test("internal: a 5 MB body without auth is refused without being read", async () => {
+  const spy = spyHousekeeping();
+  const { url } = await boot({ housekeeping: spy, plrToken: PLR });
+  const started = performance.now();
+  const reply = await quietly(() =>
+    internal(url, { body: "x".repeat(5 * 1024 * 1024), headers: { "Content-Type": "application/json" } }),
+  );
+  assert.equal(reply.result.status, 401);
+  assert.ok(performance.now() - started < 100, `took ${performance.now() - started} ms`);
+});
+
+test("internal: a call during the boot run gets the boot run's result", async () => {
+  let deps!: HousekeepingDeps;
+  const { url, store, audit } = await boot({ plrToken: PLR, housekeeping: () => runHousekeeping(deps) });
+  let backups = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  deps = {
+    audit,
+    store,
+    backupDir: "/unused",
+    backup: async () => {
+      backups++;
+      await gate;
+      return "/state/backups/policy-1.sqlite";
+    },
+  };
+
+  const bootRun = runHousekeeping(deps);
+  const call = internal(url, { bearer: PLR });
+  await new Promise((r) => setTimeout(r, 50));
+  release();
+  const [fromBoot, reply] = await Promise.all([bootRun, call]);
+  assert.equal(reply.status, 200);
+  assert.deepEqual(reply.body, fromBoot);
+  assert.equal(backups, 1);
 });

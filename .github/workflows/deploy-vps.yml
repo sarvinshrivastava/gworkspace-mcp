@@ -245,14 +245,16 @@ jobs:
           # ports, so a host port someone else holds means an outage, not a
           # failed deploy. Check first, while the old container still serves.
           # Keep in step with `ports:` in docker-compose.yml.
-          ADMIN_HOST_PORT=3017
-          if ss -ltnH "sport = :${ADMIN_HOST_PORT}" | grep -q .; then
-            holder=$(docker ps --filter "publish=${ADMIN_HOST_PORT}" --format '{{.Names}}')
-            if [ "$holder" != "gworkspace-mcp" ]; then
-              echo "host port ${ADMIN_HOST_PORT} is already held by: ${holder:-a non-Docker process}. Not touching the running container."
-              exit 1
+          # 3014 = MCP (nginx vhost gworkspace-mcp.vps), 3017 = admin dashboard.
+          for HOST_PORT in 3014 3017; do
+            if ss -ltnH "sport = :${HOST_PORT}" | grep -q .; then
+              holder=$(docker ps --filter "publish=${HOST_PORT}" --format '{{.Names}}')
+              if [ "$holder" != "gworkspace-mcp" ]; then
+                echo "host port ${HOST_PORT} is already held by: ${holder:-a non-Docker process}. Not touching the running container."
+                exit 1
+              fi
             fi
-          fi
+          done
 
           export SECRETS_MANAGER_TOKEN="$SM_TOKEN"
           docker compose -f docker-compose.yml pull

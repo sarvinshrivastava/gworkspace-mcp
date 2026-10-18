@@ -5,8 +5,10 @@ import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { DAY_MS } from "../audit.js";
 import { vaultFetchOptional } from "../config.js";
-import { tempDir } from "./helpers.js";
+import { startHousekeeping } from "../housekeeping.js";
+import { quietly, tempDir } from "./helpers.js";
 
 const entry = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "index.js");
 
@@ -69,4 +71,62 @@ test("vaultFetchOptional: 404 is empty, 200 is the value, 401 throws", async () 
     globalThis.fetch = original;
     config.vault.token = "";
   }
+});
+
+test("HOUSEKEEPING_SCHEDULER outside internal|external is fatal at boot", { timeout: 30_000 }, async () => {
+  const dir = tempDir();
+  const { code, output } = await boot({
+    DB_PATH: path.join(dir, "p.sqlite"),
+    BACKUP_DIR: path.join(dir, "b"),
+    HOUSEKEEPING_SCHEDULER: "bogus",
+  });
+  assert.match(output, /FATAL: HOUSEKEEPING_SCHEDULER must be one of internal, external/);
+  assert.doesNotMatch(output, /listening/);
+  assert.equal(code, 1);
+});
+
+const RESULT = { pruned: 0, backup: null };
+
+test("startHousekeeping external: the boot run only, no interval", () => {
+  let runs = 0;
+  const scheduled: number[] = [];
+  startHousekeeping({
+    scheduler: "external",
+    schedule: (_fn, ms) => scheduled.push(ms),
+    run: async () => (runs++, RESULT),
+  });
+  assert.equal(runs, 1);
+  assert.deepEqual(scheduled, []);
+});
+
+test("startHousekeeping internal: the boot run plus a daily interval that runs it", async () => {
+  let runs = 0;
+  const scheduled: { fn: () => void; ms: number }[] = [];
+  const { logs } = await quietly(async () => {
+    startHousekeeping({
+      scheduler: "internal",
+      schedule: (fn, ms) => scheduled.push({ fn, ms }),
+      run: async () => {
+        runs++;
+        if (runs > 1) throw new Error("disk full");
+        return RESULT;
+      },
+    });
+    // The boot run happens at once; the interval only after it.
+    assert.equal(runs, 1);
+    assert.deepEqual(scheduled.map((s) => s.ms), [DAY_MS]);
+    // The daily tick: a failure is logged, never an unhandled rejection.
+    scheduled[0]!.fn();
+    await new Promise((r) => setImmediate(r));
+  });
+  assert.equal(runs, 2);
+  assert.ok(logs.some((l) => l.includes("housekeeping failed: disk full")), logs.join("\n"));
+});
+
+test("startHousekeeping: a failing run is logged, never thrown", async () => {
+  const { logs } = await quietly(async () => {
+    startHousekeeping({ scheduler: "external", run: () => Promise.reject(new Error("disk full")) });
+    await new Promise((r) => setImmediate(r));
+  });
+  assert.ok(logs.some((l) => l.includes("housekeeping failed: disk full")), logs.join("\n"));
 });
