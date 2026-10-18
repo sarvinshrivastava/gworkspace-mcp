@@ -38,8 +38,9 @@ test("prune removes only rows past retention", () => {
   audit.tool({ slug: "a" }, "t", "allow", "", []);
   now = 100 * 24 * 60 * 60 * 1000;
   audit.tool({ slug: "a" }, "t", "allow", "", []);
-  audit.prune(90);
+  assert.equal(audit.prune(90), 1);
   assert.equal(store.queryAudit({ limit: 10 }).length, 1);
+  assert.equal(audit.prune(90), 0);
 });
 
 test("a failing store is counted, never thrown", async () => {
@@ -54,7 +55,7 @@ test("a failing store is counted, never thrown", async () => {
   const audit = new Audit(broken);
   await quietly(() => {
     audit.tool({ slug: "a" }, "t", "allow", "", []);
-    audit.prune();
+    assert.equal(audit.prune(), 0);
   });
   assert.equal(audit.errors, 2);
 });
