@@ -99,16 +99,26 @@ test("startHousekeeping external: the boot run only, no interval", () => {
   assert.deepEqual(scheduled, []);
 });
 
-test("startHousekeeping internal: the boot run plus a daily interval", () => {
+test("startHousekeeping internal: the boot run plus a daily interval that runs it", async () => {
   let runs = 0;
-  const scheduled: number[] = [];
-  startHousekeeping({
-    scheduler: "internal",
-    schedule: (_fn, ms) => scheduled.push(ms),
-    run: async () => (runs++, RESULT),
+  const scheduled: { fn: () => void; ms: number }[] = [];
+  const { logs } = await quietly(async () => {
+    startHousekeeping({
+      scheduler: "internal",
+      schedule: (fn, ms) => scheduled.push({ fn, ms }),
+      run: async () => {
+        runs++;
+        if (runs > 1) throw new Error("disk full");
+        return RESULT;
+      },
+    });
+    assert.deepEqual(scheduled.map((s) => s.ms), [DAY_MS]);
+    // The daily tick: a failure is logged, never an unhandled rejection.
+    scheduled[0]!.fn();
+    await new Promise((r) => setImmediate(r));
   });
-  assert.equal(runs, 1);
-  assert.deepEqual(scheduled, [DAY_MS]);
+  assert.equal(runs, 2);
+  assert.ok(logs.some((l) => l.includes("housekeeping failed: disk full")), logs.join("\n"));
 });
 
 test("startHousekeeping: a failing run is logged, never thrown", async () => {

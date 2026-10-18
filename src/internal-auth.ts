@@ -26,7 +26,11 @@ const digest = (value: string) => createHash("sha256").update(value).digest();
 
 export function internalGuard(
   token: () => string,
-  opts: { now?: () => number } = {},
+  opts: {
+    now?: () => number;
+    /** Each rejected bearer, for the audit trail (which dedupes per source itself). */
+    onReject?: (source: string) => void;
+  } = {},
 ): express.RequestHandler {
   const now = opts.now ?? Date.now;
   // Fixed window per source, as secrets-manager's rate-limit.js. Swept on use
@@ -69,8 +73,9 @@ export function internalGuard(
     if (!timingSafeEqual(digest(provided), digest(expected))) {
       if (!lastLogged.has(source)) {
         lastLogged.set(source, at);
-        console.warn(`[internal] rejected ${req.method} ${req.path} from ${source || "unknown"}`);
+        console.warn(`[internal] rejected ${req.method} ${req.baseUrl}${req.path} from ${source || "unknown"}`);
       }
+      opts.onReject?.(source);
       res.status(401).json({ error: "unauthorized" });
       return;
     }

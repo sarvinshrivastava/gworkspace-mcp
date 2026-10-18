@@ -157,7 +157,16 @@ async function main() {
   ]);
   legacyToken = token;
   passwordHash = hash;
-  plrToken = plr;
+  // A placeholder typed into the vault UI would be the only credential on a
+  // route one proxy hop from the internet: refuse it, so /internal/* says 503.
+  if (plr && plr.length < 32) {
+    console.error("[internal] GWORKSPACE_PLR_TOKEN is shorter than 32 characters — ignored; /internal/* answers 503 until it is replaced");
+  } else {
+    plrToken = plr;
+  }
+  if (!plrToken && config.housekeepingScheduler === "external") {
+    console.error("[db] HOUSEKEEPING_SCHEDULER=external but no usable GWORKSPACE_PLR_TOKEN: housekeeping runs at boot only until the key is set and the service restarted");
+  }
   if (!hash) console.warn("[admin] no DASHBOARD_ADMIN_PASSWORD_HASH in the vault — dashboard login is disabled");
 
   // Nothing reads the vault after boot. This removes the token from this

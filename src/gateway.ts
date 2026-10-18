@@ -162,7 +162,11 @@ export function createMcpApp(deps: GatewayDeps): express.Express {
   // pipeline-runner's daily call. Gated on the store only, not on ready():
   // ready waits for Google, and a prune and a backup are DB-only, so a Google
   // outage must not stop them. No body is read.
-  app.post("/internal/housekeeping", internalGuard(deps.plrToken), async (_req, res) => {
+  // Its own router, case-sensitive and strict, so /internal/HOUSEKEEPING and
+  // /internal/housekeeping/ are not this route either (the guard already
+  // refuses a case variant of the prefix).
+  const internal = express.Router({ caseSensitive: true, strict: true });
+  internal.post("/housekeeping", async (_req, res) => {
     const housekeeping = deps.housekeeping();
     if (!housekeeping) {
       res.status(503).json({ error: "no_store" });
@@ -171,11 +175,19 @@ export function createMcpApp(deps: GatewayDeps): express.Express {
     try {
       res.json(await housekeeping());
     } catch (error) {
-      const message = errorMessage(error);
-      console.error(`[db] housekeeping failed: ${message}`);
-      res.status(500).json({ error: message });
+      // The detail stays in this log: the caller only needs the status to
+      // retry and page, and it keeps run output that may travel further.
+      console.error(`[db] housekeeping failed: ${errorMessage(error)}`);
+      res.status(500).json({ error: "housekeeping_failed" });
     }
   });
+  app.use(
+    "/internal",
+    internalGuard(deps.plrToken, {
+      onReject: (source) => deps.audit()?.authFailure(source, "internal_bad_bearer"),
+    }),
+    internal,
+  );
 
   app.post("/mcp", (req, res, next) => {
     // Before boot finishes there is no legacy bearer and no tool list; an

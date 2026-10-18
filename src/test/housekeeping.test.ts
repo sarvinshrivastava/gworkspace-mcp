@@ -34,6 +34,18 @@ test("overlapping runs share one backup and one result", async () => {
   assert.equal(c.backup, "/state/backups/policy-2.sqlite");
 });
 
+test("a run prunes audit rows past retention and reports the count", async () => {
+  const store = tempStore();
+  let now = 0;
+  const audit = new Audit(store, () => now);
+  audit.tool({ slug: "a" }, "t", "allow", "", []);
+  now = 100 * 24 * 60 * 60 * 1000;
+  audit.tool({ slug: "a" }, "t", "allow", "", []);
+  const result = await runHousekeeping({ audit, store, backupDir: "/unused", backup: async () => null });
+  assert.deepEqual(result, { pruned: 1, backup: null });
+  assert.equal(store.queryAudit({ limit: 10 }).length, 1);
+});
+
 test("a failed run rejects every waiter and does not stick", async () => {
   const { deps } = delayedDeps();
   const failing = { ...deps, backup: async () => Promise.reject(new Error("disk full")) };

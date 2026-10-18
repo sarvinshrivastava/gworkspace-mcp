@@ -153,9 +153,12 @@ test("compose publishes MCP and admin on host loopback only", () => {
   const afterPorts = service.slice(portsAt).split("\n").slice(1);
   const end = afterPorts.findIndex((line) => line.trim() !== "" && !/^ {5,}/.test(line));
   const block = (end < 0 ? afterPorts : afterPorts.slice(0, end)).join("\n");
-  const entries = [...block.matchAll(/^\s*- '([^']+)'/gm)].map((m) => m[1]!);
+  // Any quoting, so a double-quoted or bare entry cannot slip past.
+  const entries = [...block.matchAll(/^\s*-\s*['"]?([^'"\s]+)['"]?\s*$/gm)].map((m) => m[1]!);
+  assert.equal(entries.length, block.split("\n").filter((l) => /^\s*-/.test(l)).length);
   // 3014 is the nginx vhost gworkspace-mcp.vps's upstream; 3017 the admin tunnel.
   assert.deepEqual(entries.sort(), ["127.0.0.1:3014:3014", "127.0.0.1:3017:3015"]);
+  assert.ok(entries.every((e) => e.startsWith("127.0.0.1:")));
 });
 
 test("calendar-only grants derive 4 tools", () => {

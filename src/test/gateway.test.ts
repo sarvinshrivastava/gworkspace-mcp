@@ -361,11 +361,15 @@ test("internal: no bearer is 401 and housekeeping does not run", async () => {
   assert.equal(spy.calls, 0);
 });
 
-test("internal: a wrong bearer is 401", async () => {
+test("internal: a wrong bearer is 401, audited once per minute per source", async () => {
   const spy = spyHousekeeping();
-  const { url } = await boot({ housekeeping: spy, plrToken: PLR });
-  const reply = await quietly(() => internal(url, { bearer: "legacy-token" }));
-  assert.equal(reply.result.status, 401);
+  const { url, store } = await boot({ housekeeping: spy, plrToken: PLR });
+  await quietly(async () => {
+    assert.equal((await internal(url, { bearer: "legacy-token" })).status, 401);
+    assert.equal((await internal(url, { bearer: "legacy-token" })).status, 401);
+  });
+  const rows = store.queryAudit({ limit: 10 }).filter((r) => r.reason === "internal_bad_bearer");
+  assert.equal(rows.length, 1);
   assert.equal(spy.calls, 0);
 });
 
@@ -391,7 +395,7 @@ test("internal: a proxied request is 404, whatever the bearer", async () => {
 test("internal: a case variant of the path is 404", async () => {
   const spy = spyHousekeeping();
   const { url } = await boot({ housekeeping: spy, plrToken: PLR });
-  for (const path of ["/INTERNAL/housekeeping", "/Internal/housekeeping"]) {
+  for (const path of ["/INTERNAL/housekeeping", "/Internal/housekeeping", "/internal/HOUSEKEEPING", "/internal/housekeeping/"]) {
     assert.equal((await internal(url, { bearer: PLR, path })).status, 404, path);
   }
   assert.equal(spy.calls, 0);
@@ -428,7 +432,8 @@ test("internal: a failing housekeeping run is 500", async () => {
   const { url } = await boot({ housekeeping: spy, plrToken: PLR });
   const reply = await quietly(() => internal(url, { bearer: PLR }));
   assert.equal(reply.result.status, 500);
-  assert.deepEqual(reply.result.body, { error: "disk full" });
+  assert.deepEqual(reply.result.body, { error: "housekeeping_failed" });
+  assert.ok(reply.logs.some((l) => l.includes("housekeeping failed: disk full")));
 });
 
 test("internal: the 11th request in a minute is 429 before the bearer; one log line for 10 failures", async () => {
