@@ -160,7 +160,7 @@ async function main() {
   passwordHash = hash;
   plrToken = usablePlrToken(plr);
   if (plr && !plrToken) {
-    console.error("[internal] GWORKSPACE_PLR_TOKEN is shorter than 32 characters — ignored; /internal/* answers 503 until it is replaced");
+    console.error("[internal] GWORKSPACE_PLR_TOKEN is shorter than 32 characters after trimming whitespace — ignored; /internal/* answers 503 until it is replaced");
   }
   if (!plrToken && config.housekeepingScheduler === "external") {
     console.error("[db] HOUSEKEEPING_SCHEDULER=external but no usable GWORKSPACE_PLR_TOKEN: housekeeping runs at boot only until the key is set and the service restarted");
