@@ -16,7 +16,7 @@ import { DriveError } from "./drive/client.js";
 import { denyMessage, planCall, type PipelineDeps } from "./enforce/pipeline.js";
 import { ScopeTooLarge } from "./enforce/search.js";
 import { errorMessage } from "./errors.js";
-import type { HousekeepingResult } from "./housekeeping.js";
+import type { Housekeeping } from "./housekeeping.js";
 import { internalGuard } from "./internal-auth.js";
 import type { AgentContext, Authenticator } from "./policy/auth.js";
 import { enabledTools } from "./policy/derive.js";
@@ -32,7 +32,7 @@ export type GatewayDeps = {
   ready: () => boolean;
   health: () => Record<string, unknown>;
   /** A getter: null until the policy store has opened (and in degraded mode). */
-  housekeeping: () => (() => Promise<HousekeepingResult>) | null;
+  housekeeping: () => Housekeeping | null;
   /** pipeline-runner's bearer for /internal/*; "" when the vault has none. */
   plrToken: () => string;
 };
@@ -171,8 +171,9 @@ export function createMcpApp(deps: GatewayDeps): express.Express {
     try {
       res.json(await housekeeping());
     } catch (error) {
-      console.error(`[db] housekeeping failed: ${errorMessage(error)}`);
-      res.status(500).json({ error: errorMessage(error) });
+      const message = errorMessage(error);
+      console.error(`[db] housekeeping failed: ${message}`);
+      res.status(500).json({ error: message });
     }
   });
 

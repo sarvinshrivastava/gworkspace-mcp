@@ -26,7 +26,7 @@ import { ScopeResolver } from "./enforce/resolver.js";
 import { SubtreeCache } from "./enforce/search.js";
 import { errorMessage } from "./errors.js";
 import { createMcpApp } from "./gateway.js";
-import { runHousekeeping, startHousekeeping, type HousekeepingResult } from "./housekeeping.js";
+import { runHousekeeping, startHousekeeping, type Housekeeping } from "./housekeeping.js";
 import {
   makeAuthenticator,
   makeDegradedAuthenticator,
@@ -45,7 +45,7 @@ import {
 let store: PolicyStore | null = null;
 let dbError: string | null = null;
 let audit: Audit | null = null;
-let housekeeping: (() => Promise<HousekeepingResult>) | null = null;
+let housekeeping: Housekeeping | null = null;
 let plrToken = "";
 let legacyToken = "";
 let passwordHash: string | null = null;

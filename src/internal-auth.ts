@@ -40,11 +40,8 @@ export function internalGuard(
   };
 
   return (req, res, next) => {
-    if (!req.originalUrl.startsWith("/internal/")) {
-      res.status(404).end();
-      return;
-    }
-    if (req.headers["x-forwarded-for"] !== undefined || req.headers["x-real-ip"] !== undefined) {
+    const proxied = req.headers["x-forwarded-for"] !== undefined || req.headers["x-real-ip"] !== undefined;
+    if (!req.originalUrl.startsWith("/internal/") || proxied) {
       res.status(404).end();
       return;
     }
@@ -56,7 +53,7 @@ export function internalGuard(
     if (!bucket) {
       buckets.set(source, { start: at, count: 1 });
     } else if (bucket.count >= MAX_PER_WINDOW) {
-      res.set("Retry-After", String(Math.max(1, Math.ceil((bucket.start + WINDOW_MS - at) / 1000))));
+      res.set("Retry-After", String(Math.ceil((bucket.start + WINDOW_MS - at) / 1000)));
       res.status(429).json({ error: "rate_limited" });
       return;
     } else {

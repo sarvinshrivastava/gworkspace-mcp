@@ -6,7 +6,12 @@ import { Audit } from "../audit.js";
 import { ScopeResolver } from "../enforce/resolver.js";
 import { SubtreeCache } from "../enforce/search.js";
 import { createMcpApp, type GatewayDeps } from "../gateway.js";
-import { runHousekeeping, type HousekeepingDeps, type HousekeepingResult } from "../housekeeping.js";
+import {
+  runHousekeeping,
+  type Housekeeping,
+  type HousekeepingDeps,
+  type HousekeepingResult,
+} from "../housekeeping.js";
 import { makeAuthenticator } from "../policy/auth.js";
 import { DEFAULT_GRANTS } from "../policy/derive.js";
 import { mintToken } from "../policy/tokens.js";
@@ -32,7 +37,7 @@ async function boot(
     ready?: boolean;
     withUpstream?: boolean;
     withheld?: { scoped: Set<string>; all: Set<string> };
-    housekeeping?: (() => Promise<HousekeepingResult>) | null;
+    housekeeping?: Housekeeping | null;
     plrToken?: string;
   } = {},
 ) {
@@ -318,7 +323,7 @@ test("an error past the route is a JSON-RPC internal error without a stack", asy
 const PLR = "plr-token-0123456789";
 const RESULT: HousekeepingResult = { pruned: 2, backup: "/state/backups/policy-3.sqlite" };
 
-function spyHousekeeping(impl: () => Promise<HousekeepingResult> = async () => RESULT) {
+function spyHousekeeping(impl: Housekeeping = async () => RESULT) {
   const spy = Object.assign(() => {
     spy.calls++;
     return impl();

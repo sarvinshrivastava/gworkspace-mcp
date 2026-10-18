@@ -156,7 +156,6 @@ test("compose publishes MCP and admin on host loopback only", () => {
   const entries = [...block.matchAll(/^\s*- '([^']+)'/gm)].map((m) => m[1]!);
   // 3014 is the nginx vhost gworkspace-mcp.vps's upstream; 3017 the admin tunnel.
   assert.deepEqual(entries.sort(), ["127.0.0.1:3014:3014", "127.0.0.1:3017:3015"]);
-  assert.ok(entries.every((e) => e.startsWith("127.0.0.1:")));
 });
 
 test("calendar-only grants derive 4 tools", () => {

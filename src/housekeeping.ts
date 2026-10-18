@@ -14,6 +14,7 @@ import { errorMessage } from "./errors.js";
 import { backupDaily, type PolicyStore } from "./policy/store.js";
 
 export type HousekeepingResult = { pruned: number; backup: string | null };
+export type Housekeeping = () => Promise<HousekeepingResult>;
 
 export type HousekeepingDeps = {
   audit: Audit;
@@ -51,7 +52,7 @@ export function startHousekeeping({
 }: {
   scheduler: "internal" | "external";
   schedule?: (fn: () => void, ms: number) => unknown;
-  run: () => Promise<HousekeepingResult>;
+  run: Housekeeping;
 }): void {
   const once = () => {
     run().catch((error) => console.error(`[db] housekeeping failed: ${errorMessage(error)}`));
