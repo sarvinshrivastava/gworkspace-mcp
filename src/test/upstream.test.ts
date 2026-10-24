@@ -7,12 +7,19 @@ import { createRequire } from "node:module";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+import { existsSync, readFileSync } from "node:fs";
+
+import { GoogleHealth, type BrokenKind } from "../drive/health.js";
 import {
   EXPECTED_KEYS,
+  applyProbe,
+  childEnv,
   normaliseToken,
   refreshTokenOf,
   selectTools,
   tripwire,
+  upstreamState,
+  watchClose,
   type UpstreamTool,
 } from "../upstream.js";
 import { quietly } from "./helpers.js";
@@ -130,4 +137,108 @@ test("EXPECTED_KEYS match the installed upstream", { timeout: 60_000 }, async ()
   } finally {
     await client.close();
   }
+});
+
+// --- credential probe, child exit, child env -------------------------------------
+
+const probeRig = () => {
+  const sent: BrokenKind[] = [];
+  const google = new GoogleHealth();
+  google.setBroadcast((kind) => sent.push(kind));
+  return { google, sent };
+};
+const failed = (text: string) => ({ isError: true, content: [{ type: "text", text }] });
+
+test("childEnv has exactly the explicit keys and nothing from the parent's secrets", () => {
+  process.env.SECRETS_MANAGER_TOKEN = "vault-secret";
+  process.env.NTFY_BASE = "https://ntfy.example";
+  try {
+    const env = childEnv({ clientId: "cid", clientSecret: "csecret" });
+    assert.deepEqual(Object.keys(env).sort(), [
+      "GOOGLE_CLIENT_ID",
+      "GOOGLE_CLIENT_SECRET",
+      "HOME",
+      "NODE_ENV",
+      "NODE_OPTIONS",
+      "PATH",
+      "XDG_CONFIG_HOME",
+    ]);
+    assert.ok(!Object.values(env).some((v) => v.includes("vault-secret") || v.includes("ntfy.example")));
+  } finally {
+    delete process.env.SECRETS_MANAGER_TOKEN;
+    delete process.env.NTFY_BASE;
+  }
+});
+
+test("applyProbe: a missing probe logs skipped, never verified, and seeds nothing", async () => {
+  const { google, sent } = probeRig();
+  for (const missing of [undefined, null]) {
+    const { logs } = await quietly(() => applyProbe(missing, google));
+    assert.deepEqual(logs, ["[upstream] CREDENTIAL CHECK skipped: the Workspace server is not connected"]);
+  }
+  assert.deepEqual(google.snapshot(), { state: "unknown", since: null, consecutiveFailures: 0, probe: "unknown" });
+  assert.deepEqual(sent, []);
+});
+
+test("applyProbe: a good probe is verified and pushes nothing", async () => {
+  const { google, sent } = probeRig();
+  const lines: string[] = [];
+  const { log } = console;
+  console.log = (...args: unknown[]) => lines.push(args.map(String).join(" "));
+  try {
+    applyProbe({ content: [{ type: "text", text: "[]" }] }, google);
+  } finally {
+    console.log = log;
+  }
+  assert.deepEqual(lines, ["[upstream] credential verified"]);
+  assert.equal(google.snapshot().probe, "ok");
+  assert.deepEqual(sent, []);
+});
+
+test("applyProbe: invalid_grant past character 300 still rejects", async () => {
+  const { google, sent } = probeRig();
+  const { logs } = await quietly(() => applyProbe(failed(`${"x".repeat(400)} invalid_grant`), google));
+  assert.ok(logs[0]!.startsWith("[upstream] CREDENTIAL CHECK FAILED"));
+  assert.ok(logs[0]!.length < 450);
+  assert.equal(google.snapshot().state, "rejected");
+  assert.deepEqual(sent, ["rejected"]);
+});
+
+test("applyProbe: any other probe failure marks the probe failed and leaves the state alone", async () => {
+  const { google, sent } = probeRig();
+  await quietly(() => applyProbe(failed("HTTP 403 accessNotConfigured"), google));
+  assert.equal(google.snapshot().probe, "failed");
+  assert.equal(google.snapshot().state, "unknown");
+  assert.deepEqual(sent, ["probe"]);
+});
+
+test("watchClose: an exit clears the shared client and calls onExit exactly once", () => {
+  const before = upstreamState.client;
+  upstreamState.client = {} as never;
+  let exits = 0;
+  const client: { onclose?: () => void } = {};
+  try {
+    watchClose(client, () => exits++);
+    void quietly(() => client.onclose!());
+    assert.equal(upstreamState.client, null);
+    assert.equal(exits, 1);
+  } finally {
+    upstreamState.client = before;
+  }
+});
+
+test("watchClose works without an onExit", () => {
+  const before = upstreamState.client;
+  const client: { onclose?: () => void } = {};
+  try {
+    watchClose(client);
+    void quietly(() => client.onclose!());
+  } finally {
+    upstreamState.client = before;
+  }
+});
+
+test("compose carries NTFY_BASE with the public default", () => {
+  if (!existsSync("docker-compose.yml")) return;
+  assert.match(readFileSync("docker-compose.yml", "utf8"), /NTFY_BASE: '\$\{NTFY_BASE:-https:\/\/ntfy\.sh\}'/);
 });

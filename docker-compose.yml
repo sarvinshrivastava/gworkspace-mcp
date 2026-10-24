@@ -55,6 +55,8 @@ services:
       SECRETS_MANAGER_FOLDER: '${SECRETS_MANAGER_FOLDER:-Root}'
       SECRETS_MANAGER_TOKEN: '${SECRETS_MANAGER_TOKEN:?set SECRETS_MANAGER_TOKEN in the shell, or deploy via the workflow}'
 
+      NTFY_BASE: '${NTFY_BASE:-https://ntfy.sh}'
+
       # Measured: these 20 tools are 23 KB of schema, ~6k tokens; all 119 are
       # 126 KB, ~31k tokens — and Open WebUI re-lists on EVERY chat turn and
       # resends on every LLM call, so a 3-step tool sequence pays it four times.
