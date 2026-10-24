@@ -257,3 +257,24 @@ export const listTools = (url: string, bearer: string) =>
 
 export const callTool = (url: string, bearer: string, name: string, args: Record<string, unknown>) =>
   mcpCall(url, bearer, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: args } });
+
+// ---------------------------------------------------------------------------
+// A fetch double for the real DriveClient: answers from a handler, records calls.
+
+export type FetchCall = { url: string; init?: RequestInit };
+
+export function fakeFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
+  const calls: FetchCall[] = [];
+  const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    calls.push({ url, init });
+    return handler(url, init);
+  }) as typeof fetch;
+  return { impl, calls };
+}
+
+export const json = (status: number, body: unknown) =>
+  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
+export const creds = { clientId: "cid", clientSecret: "csecret", refreshToken: "1//rt" };
+export const tokenOk = () => json(200, { access_token: "at-1", expires_in: 3600 });
