@@ -41,7 +41,7 @@ services:
       # `internal` (a 24 h interval in-process) or `external` (pipeline-runner's
       # job gworkspace-mcp/housekeeping calls POST /internal/housekeeping with
       # the vault's GWORKSPACE_PLR_TOKEN). Anything else refuses to boot.
-      HOUSEKEEPING_SCHEDULER: '${HOUSEKEEPING_SCHEDULER:-internal}'
+      HOUSEKEEPING_SCHEDULER: '${HOUSEKEEPING_SCHEDULER:-external}'
       CONFIG_HOME: '/data/config'
       TOKEN_DIR: '/data/config/google-docs-mcp'
       # This process only. The child gets its own budget (CHILD_HEAP_MB), set
