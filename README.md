@@ -28,7 +28,7 @@ empty allowlist exposes nothing, by design.
 
 ## Secrets
 
-Four values in the vault under `Root`:
+Four required values in the vault under `Root`, and one optional:
 
 | Key | What |
 |---|---|
@@ -36,6 +36,7 @@ Four values in the vault under `Root`:
 | `GOOGLE_CLIENT_ID` | Desktop-app OAuth client id |
 | `GOOGLE_CLIENT_SECRET` | its secret |
 | `GOOGLE_TOKEN_JSON` | the contents of `~/.config/google-docs-mcp/token.json` |
+| `GWORKSPACE_NTFY_TOPIC` | optional: the ntfy topic for broken-only pushes (see below). Any unguessable name you choose; share it with every agent using the service. Delete the key to turn pushes off: an empty stored value, or a 401/403 reading it, stops boot like the other optional keys |
 
 The vault is the only copy that matters. `token.json` is written into a tmpfs at
 every boot from `GOOGLE_TOKEN_JSON` and nothing persists it: the upstream writes
@@ -57,6 +58,21 @@ If the OAuth consent screen is still in **Testing** status, Google expires the
 refresh token every 7 days and this breaks weekly. Move the client to
 "In production" — no verification review is needed for a single internal user.
 
+## Push alerts
+
+When `GWORKSPACE_NTFY_TOPIC` is set the service posts **only when something is broken**, to `NTFY_BASE` (default `https://ntfy.sh`, set in `docker-compose.yml`). Without the key it only logs. There is no recovery message: recovery shows in the log (`[recovered]`) and in `/healthz`.
+
+On public ntfy.sh the topic is a credential: anyone who knows it can read it **and post to it**. These four notices are the only authentic shapes; agent integrations should ignore anything else on the topic.
+
+| title | message |
+|---|---|
+| `gworkspace-mcp: Google access rejected` | `Google access rejected (<category>). Workspace tools will fail until the owner re-consents and replaces GOOGLE_TOKEN_JSON, or enables the API. Since <iso>.` |
+| `gworkspace-mcp: Google Drive failing` | `<n> consecutive Drive failures since <iso>. Last: <category>. Usually transient.` |
+| `gworkspace-mcp: Google credential check failed at boot` | `The boot credential check failed. Workspace tools may fail. Since <iso>.` |
+| `gworkspace-mcp: Workspace server exited` | `The Google Workspace server process exited. Tool calls fail until the service restarts. Since <iso>.` |
+
+Cadence: at most one delivered push per kind per 30 minutes. While an outage continues and agents keep calling, the same push repeats every 30 minutes per kind to every subscriber. A push that could not be delivered is retried at the next event of that kind, never sooner than a minute later. A failed boot probe pushes once per boot and is not retried.
+
 ## Diagnosing it
 
 The container is deliberately unpublished, so `curl` from the VPS host always
@@ -71,6 +87,8 @@ docker logs --tail 100 gworkspace-mcp
 |---|---|
 | `/healthz` 503, `[upstream] the Workspace server exited` | the child died — restart the container; `autoheal` should already have |
 | `/healthz` 200 and `CREDENTIAL CHECK FAILED` in the log | the grant is revoked or expired — re-run consent above |
+| `/healthz` 200, `google.state` `rejected`, `[alert] Google access rejected (invalid_grant)` | Google refuses the refresh token — re-run consent above. Tool calls say "do not retry". `[drive]` lines carry the cause |
+| `/healthz` 200, `google.state` `failing`, `[alert] Google Drive failing` | Drive keeps erroring (5xx, timeouts, network) — usually Google or egress; it clears itself on the next good Drive answer |
 | `/healthz` 200, `"tools": 0` | `TOOL_ALLOWLIST` is empty. That exposes nothing, by design |
 | every call returns `Failed: …insufficient authentication scopes` | the grant is missing a scope; re-consent with the full set |
 | container crash-looping, log names a vault key | that key is absent from the vault |
