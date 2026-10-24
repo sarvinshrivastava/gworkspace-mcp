@@ -22,6 +22,7 @@ import { makeAllowedSources } from "./admin/security.js";
 import { Audit } from "./audit.js";
 import { config, vaultFetch, vaultFetchOptional } from "./config.js";
 import { DriveClient } from "./drive/client.js";
+import { GoogleHealth } from "./drive/health.js";
 import { ScopeResolver } from "./enforce/resolver.js";
 import { SubtreeCache } from "./enforce/search.js";
 import { errorMessage } from "./errors.js";
@@ -51,6 +52,7 @@ let plrToken = "";
 let legacyToken = "";
 let passwordHash: string | null = null;
 let drive: DriveClient | null = null;
+const google = new GoogleHealth();
 let ready = false;
 
 /**
@@ -109,6 +111,7 @@ async function main() {
     health: () => ({ db: store !== null, auditErrors: audit?.errors ?? 0 }),
     housekeeping: () => housekeeping,
     plrToken: () => plrToken,
+    google,
   });
 
   const adminApp = createAdminApp({
