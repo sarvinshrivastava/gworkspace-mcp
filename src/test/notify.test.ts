@@ -6,6 +6,8 @@ import { quietly } from "./helpers.js";
 
 const notice = { title: "gworkspace-mcp: Google access rejected", message: "msg" };
 const TOPIC = "s3cret-topic-123";
+/** Node prints a one-off SQLite ExperimentalWarning that `quietly` also catches; only our lines count. */
+const alerts = (logs: string[]) => logs.filter((l) => l.startsWith("[alert]"));
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 type Seen = { url: string; init?: RequestInit };
@@ -66,22 +68,28 @@ test("a non-2xx answer, a throw and a hang all resolve false and log neither the
   const bad = recording(() => new Response("no", { status: 500 }));
   const a = await quietly(() => notifierFrom(TOPIC, "https://ntfy.sh", bad.impl)!(notice));
   assert.equal(a.result, false);
-  assert.deepEqual(a.logs, ["[alert] ntfy push failed: HTTP 500"]);
+  assert.deepEqual(alerts(a.logs), ["[alert] ntfy push failed: HTTP 500"]);
 
   const throwing = recording(() => {
     throw new TypeError(`fetch failed for https://ntfy.sh/${TOPIC}`);
   });
   const b = await quietly(() => notifierFrom(TOPIC, "https://ntfy.sh", throwing.impl)!(notice));
   assert.equal(b.result, false);
-  assert.deepEqual(b.logs, ["[alert] ntfy push failed: TypeError"]);
+  assert.deepEqual(alerts(b.logs), ["[alert] ntfy push failed: TypeError"]);
 
   const hanging = (async (_url: unknown, init?: RequestInit) =>
     new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
     })) as typeof fetch;
-  const c = await quietly(() => notifierFrom(TOPIC, "https://ntfy.sh", hanging, 20)!(notice));
+  // AbortSignal.timeout's timer is unref'd and a fake fetch holds no socket, so
+  // without a ref'd timer the event loop empties and the runner cancels the test.
+  const keepAlive = setTimeout(() => undefined, 5_000);
+  const c = await quietly(() => notifierFrom(TOPIC, "https://ntfy.sh", hanging, 20)!(notice)).finally(() =>
+    clearTimeout(keepAlive),
+  );
   assert.equal(c.result, false);
-  assert.ok(c.logs[0]!.startsWith("[alert] ntfy push failed:"));
+  assert.equal(alerts(c.logs).length, 1);
+  assert.match(alerts(c.logs)[0]!, /^\[alert\] ntfy push failed: /);
   assert.ok(!c.logs.join("\n").includes(TOPIC));
 });
 
