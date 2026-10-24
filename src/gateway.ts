@@ -119,17 +119,21 @@ export function createServer(ctx: AgentContext, deps: GatewayDeps): McpServer {
                 return fail(denyMessage("too_large"));
               }
               if (error instanceof DriveError && error.rejection && error.source !== "calendar") {
+                const category = categoryOf(error);
+                const detail = errorMessage(error);
                 audit?.tool(ctx, tool.name, "deny", "credential_rejected", plan.resources);
-                deps.google.logDrive(tool.name, "credential_rejected", categoryOf(error), errorMessage(error));
-                deps.google.failure("rejected", categoryOf(error), errorMessage(error));
+                deps.google.logDrive(tool.name, "credential_rejected", category, detail);
+                deps.google.failure("rejected", category, detail);
                 return fail(denyMessage("credential_rejected", undefined, rejectionDetail(error)));
               }
               // Drive not answering (rate limit, 5xx, timeout): "try again",
               // as everywhere else — never Drive's raw status text.
               if ((error instanceof DriveError && error.retryable) || isAbort(error)) {
+                const category = categoryOf(error);
+                const detail = errorMessage(error);
                 audit?.tool(ctx, tool.name, "deny", "drive_error", plan.resources);
-                deps.google.logDrive(tool.name, "drive_error", categoryOf(error), errorMessage(error));
-                deps.google.failure("transient", categoryOf(error), errorMessage(error));
+                deps.google.logDrive(tool.name, "drive_error", category, detail);
+                deps.google.failure("transient", category, detail);
                 return fail(denyMessage("drive_error"));
               }
               throw error;

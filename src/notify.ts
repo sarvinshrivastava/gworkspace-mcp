@@ -30,14 +30,8 @@ export function notifierFrom(
     console.warn("[alert] ntfy disabled: invalid topic");
     return null;
   }
-  let url: URL;
-  try {
-    url = new URL(base);
-  } catch {
-    console.warn("[alert] ntfy disabled: invalid base");
-    return null;
-  }
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK.has(url.hostname))) {
+  const url = URL.canParse(base) ? new URL(base) : null;
+  if (!url || (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK.has(url.hostname)))) {
     console.warn("[alert] ntfy disabled: invalid base");
     return null;
   }

@@ -129,7 +129,11 @@ const denyDrive = (reason: DriveReason, resources: string[], category: string, d
   resources: resources.slice(0, MAX_RESOURCES),
 });
 
-const validId = (value: unknown): value is string =>
+/** Google could not answer or refused: never "your folder is gone". */
+const isDriveVerdict = (v: Verdict): v is Extract<Verdict, { reason: DriveReason }> =>
+  !v.ok && (v.reason === "drive_error" || v.reason === "credential_rejected");
+
+const validId =(value: unknown): value is string =>
   typeof value === "string" && ID_RE.test(value);
 
 export async function planCall(
@@ -201,7 +205,7 @@ export async function planCall(
   const r = deps.resolver;
 
   const verdictDeny = (v: Verdict & { ok: false }, id: string): Plan =>
-    v.reason === "drive_error" || v.reason === "credential_rejected"
+    isDriveVerdict(v)
       ? denyDrive(v.reason, [id], v.category, v.detail)
       : deny(v.reason, [id], id);
 
@@ -219,9 +223,7 @@ export async function planCall(
     if (!primary) return deny("no_primary", []);
     const v = await r.check(primary, scopeIds, live);
     // Drive not answering is "try again", never "your folder is gone".
-    if (!v.ok && (v.reason === "drive_error" || v.reason === "credential_rejected")) {
-      return denyDrive(v.reason, [primary], v.category, v.detail);
-    }
+    if (isDriveVerdict(v)) return denyDrive(v.reason, [primary], v.category, v.detail);
     if (!v.ok || v.file.mimeType !== FOLDER_MIME) return deny("primary_unavailable", [primary]);
     return primary;
   };
@@ -294,9 +296,7 @@ export async function planCall(
       for (const id of scopeIds) {
         const v = await r.check(id, scopeIds, false);
         if (v.ok) roots.push(id);
-        else if (v.reason === "drive_error" || v.reason === "credential_rejected") {
-          return denyDrive(v.reason, [id], v.category, v.detail);
-        }
+        else if (isDriveVerdict(v)) return denyDrive(v.reason, [id], v.category, v.detail);
       }
       if (!roots.length) return deny("primary_unavailable", [...scopeIds]);
     }
