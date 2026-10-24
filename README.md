@@ -28,7 +28,7 @@ empty allowlist exposes nothing, by design.
 
 ## Secrets
 
-Four required values in the vault under `Root`, and one optional:
+Four required values in the vault under `Root`, and optional ones (the table lists the ones this service reads for alerts):
 
 | Key | What |
 |---|---|
@@ -71,6 +71,8 @@ On public ntfy.sh the topic is a credential: anyone who knows it can read it **a
 | `gworkspace-mcp: Google credential check failed at boot` | `The boot credential check failed. Workspace tools may fail. Since <iso>.` |
 | `gworkspace-mcp: Workspace server exited` | `The Google Workspace server process exited. Tool calls fail until the service restarts. Since <iso>.` |
 
+`/healthz` carries `google: {state, since, consecutiveFailures, probe}`: `state` is `unknown|ok|failing|rejected`, `probe` is `unknown|ok|failed`. `consecutiveFailures` keeps counting while `state` is `rejected`. The HTTP status never depends on it.
+
 Cadence: at most one delivered push per kind per 30 minutes. While an outage continues and agents keep calling, the same push repeats every 30 minutes per kind to every subscriber. A push that could not be delivered is retried at the next event of that kind, never sooner than a minute later. A failed boot probe pushes once per boot and is not retried.
 
 ## Diagnosing it
@@ -88,6 +90,7 @@ docker logs --tail 100 gworkspace-mcp
 | `/healthz` 503, `[upstream] the Workspace server exited` | the child died — restart the container; `autoheal` should already have |
 | `/healthz` 200 and `CREDENTIAL CHECK FAILED` in the log | the grant is revoked or expired — re-run consent above |
 | `/healthz` 200, `google.state` `rejected`, `[alert] Google access rejected (invalid_grant)` | Google refuses the refresh token — re-run consent above. Tool calls say "do not retry". `[drive]` lines carry the cause |
+| `/healthz` 200 and `CREDENTIAL CHECK skipped` or `could not run` in the log | the boot probe did not run (child not connected, or the call threw); nothing was checked, `google.probe` stays `unknown` — read `google.state` after the first real call |
 | `/healthz` 200, `google.state` `failing`, `[alert] Google Drive failing` | Drive keeps erroring (5xx, timeouts, network) — usually Google or egress; it clears itself on the next good Drive answer |
 | `/healthz` 200, `"tools": 0` | `TOOL_ALLOWLIST` is empty. That exposes nothing, by design |
 | every call returns `Failed: …insufficient authentication scopes` | the grant is missing a scope; re-consent with the full set |

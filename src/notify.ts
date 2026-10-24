@@ -31,11 +31,18 @@ export function notifierFrom(
     return null;
   }
   const url = URL.canParse(base) ? new URL(base) : null;
-  if (!url || (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK.has(url.hostname)))) {
+  if (
+    !url ||
+    url.search ||
+    url.hash ||
+    url.username ||
+    url.password ||
+    (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK.has(url.hostname)))
+  ) {
     console.warn("[alert] ntfy disabled: invalid base");
     return null;
   }
-  const target = `${base.replace(/\/+$/, "")}/${topic}`;
+  const target = `${url.origin}${url.pathname.replace(/\/+$/, "")}/${topic}`;
   return async (notice) => {
     try {
       const res = await fetchImpl(target, {

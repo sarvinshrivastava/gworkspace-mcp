@@ -23,7 +23,7 @@ import { Audit } from "./audit.js";
 import { config, vaultFetch, vaultFetchOptional } from "./config.js";
 import { DriveClient } from "./drive/client.js";
 import { GoogleHealth } from "./drive/health.js";
-import { makeBroadcaster, notifierFrom } from "./notify.js";
+import { wireGoogle } from "./google.js";
 import { ScopeResolver } from "./enforce/resolver.js";
 import { SubtreeCache } from "./enforce/search.js";
 import { errorMessage } from "./errors.js";
@@ -186,19 +186,16 @@ async function main() {
   // child; it never leaves this process.
   // Normalised once here; connectUpstream's own pass is then silent.
   const normalised = normaliseToken(tokenJson);
-  drive = new DriveClient(
-    { clientId, clientSecret, refreshToken: refreshTokenOf(normalised) },
-    fetch,
-    10_000,
-    Date.now,
-    { onOk: (startedAt) => google.ok(startedAt) },
-  );
-
   // Before connectUpstream: the probe below and any later exit of the child
-  // push through this.
-  google.setBroadcast(makeBroadcaster(notifierFrom(ntfyTopic, config.ntfyBase)));
+  // push through the broadcaster this wires.
+  const wired = wireGoogle(google, {
+    creds: { clientId, clientSecret, refreshToken: refreshTokenOf(normalised) },
+    ntfyTopic,
+    ntfyBase: config.ntfyBase,
+  });
+  drive = wired.drive;
 
-  await connectUpstream({ clientId, clientSecret, tokenJson: normalised }, () => google.upstreamDown());
+  await connectUpstream({ clientId, clientSecret, tokenJson: normalised }, wired.onExit);
   ready = true;
   console.log(
     `exposing: ${upstreamState.exposedTools.map((t) => t.name).join(", ") || "(none)"}`,

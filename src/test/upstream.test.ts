@@ -150,6 +150,7 @@ const probeRig = () => {
 const failed = (text: string) => ({ isError: true, content: [{ type: "text", text }] });
 
 test("childEnv has exactly the explicit keys and nothing from the parent's secrets", () => {
+  const saved = { token: process.env.SECRETS_MANAGER_TOKEN, base: process.env.NTFY_BASE };
   process.env.SECRETS_MANAGER_TOKEN = "vault-secret";
   process.env.NTFY_BASE = "https://ntfy.example";
   try {
@@ -165,8 +166,10 @@ test("childEnv has exactly the explicit keys and nothing from the parent's secre
     ]);
     assert.ok(!Object.values(env).some((v) => v.includes("vault-secret") || v.includes("ntfy.example")));
   } finally {
-    delete process.env.SECRETS_MANAGER_TOKEN;
-    delete process.env.NTFY_BASE;
+    if (saved.token === undefined) delete process.env.SECRETS_MANAGER_TOKEN;
+    else process.env.SECRETS_MANAGER_TOKEN = saved.token;
+    if (saved.base === undefined) delete process.env.NTFY_BASE;
+    else process.env.NTFY_BASE = saved.base;
   }
 });
 
@@ -212,14 +215,14 @@ test("applyProbe: any other probe failure marks the probe failed and leaves the 
   assert.deepEqual(sent, ["probe"]);
 });
 
-test("watchClose: an exit clears the shared client and calls onExit exactly once", () => {
+test("watchClose: an exit clears the shared client and calls onExit exactly once", async () => {
   const before = upstreamState.client;
   upstreamState.client = {} as never;
   let exits = 0;
   const client: { onclose?: () => void } = {};
   try {
     watchClose(client, () => exits++);
-    void quietly(() => client.onclose!());
+    await quietly(() => client.onclose!());
     assert.equal(upstreamState.client, null);
     assert.equal(exits, 1);
   } finally {
@@ -227,12 +230,12 @@ test("watchClose: an exit clears the shared client and calls onExit exactly once
   }
 });
 
-test("watchClose works without an onExit", () => {
+test("watchClose works without an onExit", async () => {
   const before = upstreamState.client;
   const client: { onclose?: () => void } = {};
   try {
     watchClose(client);
-    void quietly(() => client.onclose!());
+    await quietly(() => client.onclose!());
   } finally {
     upstreamState.client = before;
   }

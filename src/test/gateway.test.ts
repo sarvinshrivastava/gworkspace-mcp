@@ -648,16 +648,19 @@ test("end to end through a real DriveClient: only a request started after the re
   assert.equal(w.google.snapshot().state, "ok");
 });
 
-test("a call with no upstream broadcasts upstream_down; a call before ready does not", async () => {
+test("a call with no upstream broadcasts upstream_down", async () => {
   const w = watched({ withUpstream: false });
-  const { url, setReady } = await w.boot();
+  const { url } = await w.boot();
   await quietly(() => callTool(url, "legacy-token", "readDocument", { documentId: "doc-in-F-001" }));
   assert.deepEqual(w.sent.map((s) => s.kind), ["upstream_down"]);
-  const before = watched({ ready: false });
-  const booted = await before.boot();
-  await listTools(booted.url, "legacy-token");
-  assert.deepEqual(before.sent, []);
-  setReady(true);
+});
+
+test("a call before ready never reaches the tracker, even with no upstream", async () => {
+  const w = watched({ ready: false, withUpstream: false });
+  const { url } = await w.boot();
+  const reply = await callTool(url, "legacy-token", "readDocument", { documentId: "doc-in-F-001" });
+  assert.equal(reply.status, 503);
+  assert.deepEqual(w.sent, []);
 });
 
 test("a never-answering ntfy does not delay a rejected-credential denial", async () => {

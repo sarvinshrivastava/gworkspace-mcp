@@ -133,7 +133,7 @@ const denyDrive = (reason: DriveReason, resources: string[], category: string, d
 const isDriveVerdict = (v: Verdict): v is Extract<Verdict, { reason: DriveReason }> =>
   !v.ok && (v.reason === "drive_error" || v.reason === "credential_rejected");
 
-const validId =(value: unknown): value is string =>
+const validId = (value: unknown): value is string =>
   typeof value === "string" && ID_RE.test(value);
 
 export async function planCall(

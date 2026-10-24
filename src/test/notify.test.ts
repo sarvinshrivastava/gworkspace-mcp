@@ -27,6 +27,9 @@ test("an empty, invalid or insecure setup returns null, says why and never logs 
     [TOPIC, "not a url", "invalid base"],
     [TOPIC, "http://ntfy.sh", "invalid base"],
     [TOPIC, "ftp://ntfy.sh", "invalid base"],
+    [TOPIC, "https://ntfy.sh?x=1", "invalid base"],
+    [TOPIC, "https://ntfy.sh/#frag", "invalid base"],
+    [TOPIC, "https://user:pass@ntfy.sh", "invalid base"],
   ];
   for (const [topic, base, why] of cases) {
     const { result, logs } = await quietly(() => notifierFrom(topic, base));
@@ -51,6 +54,12 @@ test("posts the fixed notice to base/topic with the ntfy headers; a trailing new
     Tags: "warning",
     "Content-Type": "text/plain; charset=utf-8",
   });
+});
+
+test("a base path is kept and the target comes from the parsed URL", async () => {
+  const { seen, impl } = recording(() => new Response("{}", { status: 200 }));
+  await notifierFrom(TOPIC, "https://ntfy.example/prefix//", impl)!(notice);
+  assert.equal(seen[0]!.url, `https://ntfy.example/prefix/${TOPIC}`);
 });
 
 test("a non-2xx answer, a throw and a hang all resolve false and log neither the topic nor the URL", async () => {
