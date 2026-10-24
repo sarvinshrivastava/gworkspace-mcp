@@ -14,7 +14,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 import { config } from "./config.js";
-import { errorMessage } from "./errors.js";
+import type { GoogleHealth } from "./drive/health.js";
+import { SECRETISH, errorMessage, redactDetail } from "./errors.js";
 
 export type UpstreamTool = {
   name: string;
@@ -60,11 +61,10 @@ export const upstreamState: UpstreamState = {
  * whose config carries the POST body, i.e. the client secret and the refresh
  * token. Piping it raw would write both into the container's json-file log.
  */
-function drainStderr(raw: unknown): void {
+export function drainStderr(raw: unknown): void {
   // The SDK types this as Stream; it is a PassThrough at runtime.
   const stream = raw as NodeJS.ReadableStream | null;
   if (!stream?.on) return;
-  const SECRETISH = /refresh_token|client_secret|access_token|Bearer\s|"token"/i;
   let carry = "";
   let dropped = 0;
   stream.setEncoding("utf8");
@@ -138,15 +138,55 @@ export function refreshTokenOf(normalisedJson: string): string {
 }
 
 /**
+ * The child's environment, built explicitly and NOT spread from process.env.
+ * The child is ~155 files of third-party code that also parses every byte of
+ * attacker-controlled document text; a spread hands it SECRETS_MANAGER_TOKEN,
+ * which reads the whole Root folder of the vault — VPS_SSH_KEY included. It
+ * also hands it MCP_TRANSPORT and SERVICE_ACCOUNT_PATH, either of which
+ * silently changes what the child does. (Exported so a test pins the exact keys.)
+ */
+export function childEnv(credentials: { clientId: string; clientSecret: string }): Record<string, string> {
+  return {
+    PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    NODE_ENV: "production",
+    // Its own heap budget, not the parent's: both processes inheriting one
+    // --max-old-space-size is how two 192 MB heaps end up in a 320 MB cgroup.
+    NODE_OPTIONS: `--max-old-space-size=${config.childHeapMb}`,
+    GOOGLE_CLIENT_ID: credentials.clientId,
+    GOOGLE_CLIENT_SECRET: credentials.clientSecret,
+    // The upstream resolves its token store relative to XDG config.
+    XDG_CONFIG_HOME: config.configHome,
+    HOME: config.configHome,
+  };
+}
+
+/**
+ * A dead child is otherwise invisible: the SDK clears its own transport and
+ * never touches this module's reference, so /healthz stayed 200, the Docker
+ * healthcheck stayed green, autoheal never fired, and every tool call
+ * returned "Failed: Not connected" until someone restarted it by hand.
+ */
+export function watchClose(client: { onclose?: () => void }, onExit?: () => void): void {
+  client.onclose = () => {
+    console.error("[upstream] the Workspace server exited — marking unhealthy");
+    upstreamState.client = null;
+    onExit?.();
+  };
+}
+
+/**
  * Start the stdio child once and keep it. Google's OAuth refresh happens inside
  * that process, so restarting it per request would re-do the token dance every
  * time and lose its cache.
  */
-export async function connectUpstream(credentials: {
-  clientId: string;
-  clientSecret: string;
-  tokenJson: string;
-}): Promise<void> {
+export async function connectUpstream(
+  credentials: {
+    clientId: string;
+    clientSecret: string;
+    tokenJson: string;
+  },
+  onExit?: () => void,
+): Promise<void> {
   // The upstream server reads its refresh token from this path. Writing it at
   // boot from the vault keeps the credential out of the image and out of git.
   const tokenPath = path.join(config.tokenDir, "token.json");
@@ -170,24 +210,7 @@ export async function connectUpstream(credentials: {
   const transport = new StdioClientTransport({
     command: "node",
     args: [config.upstreamEntry],
-    // Built explicitly, NOT spread from process.env. The child is ~155 files of
-    // third-party code that also parses every byte of attacker-controlled
-    // document text; a spread hands it SECRETS_MANAGER_TOKEN, which reads the
-    // whole Root folder of the vault — VPS_SSH_KEY included. It also hands it
-    // MCP_TRANSPORT and SERVICE_ACCOUNT_PATH, either of which silently changes
-    // what the child does.
-    env: {
-      PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-      NODE_ENV: "production",
-      // Its own heap budget, not the parent's: both processes inheriting one
-      // --max-old-space-size is how two 192 MB heaps end up in a 320 MB cgroup.
-      NODE_OPTIONS: `--max-old-space-size=${config.childHeapMb}`,
-      GOOGLE_CLIENT_ID: credentials.clientId,
-      GOOGLE_CLIENT_SECRET: credentials.clientSecret,
-      // The upstream resolves its token store relative to XDG config.
-      XDG_CONFIG_HOME: config.configHome,
-      HOME: config.configHome,
-    },
+    env: childEnv(credentials),
     stderr: "pipe",
   });
 
@@ -202,14 +225,7 @@ export async function connectUpstream(credentials: {
   drainStderr(transport.stderr);
   await client.connect(transport);
 
-  // A dead child is otherwise invisible: the SDK clears its own transport and
-  // never touches this module's reference, so /healthz stayed 200, the Docker
-  // healthcheck stayed green, autoheal never fired, and every tool call
-  // returned "Failed: Not connected" until someone restarted it by hand.
-  client.onclose = () => {
-    console.error("[upstream] the Workspace server exited — marking unhealthy");
-    upstreamState.client = null;
-  };
+  watchClose(client, onExit);
 
   const listed = await client.listTools();
   const tools = listed.tools as UpstreamTool[];
@@ -335,13 +351,44 @@ export function tripwire(tools: UpstreamTool[]): Withheld {
   return withheld;
 }
 
-/** The text of a tool result, for logging. Truncated; never the arguments. */
-export function describeResult(result: unknown): string {
+/** The whole text of a tool result. Not for logs: use describeResult. */
+function resultText(result: unknown): string {
   const content = (result as { content?: Array<{ type?: string; text?: string }> })
     .content;
   if (!Array.isArray(content)) return "(no content)";
-  return content
-    .map((part) => (part.type === "text" ? part.text : `<${part.type}>`))
-    .join(" ")
-    .slice(0, 300);
+  return content.map((part) => (part.type === "text" ? part.text : `<${part.type}>`)).join(" ");
+}
+
+/** The text of a tool result, for logging. Truncated; never the arguments. */
+export function describeResult(result: unknown): string {
+  return resultText(result).slice(0, 300);
+}
+
+/**
+ * Reads the boot probe (`listDocuments` with fixed arguments, so no agent input
+ * is echoed) into the log and the Google tracker. `invalid_grant` is looked for
+ * in the whole text, since the log copy is cut at 300 characters.
+ */
+export function applyProbe(probe: unknown, google: GoogleHealth): void {
+  if (probe === undefined || probe === null) {
+    // The child is not connected: nothing was checked, so nothing is claimed.
+    console.warn("[upstream] CREDENTIAL CHECK skipped: the Workspace server is not connected");
+    return;
+  }
+  if ((probe as { isError?: boolean }).isError) {
+    console.error(
+      `[upstream] CREDENTIAL CHECK FAILED — every Workspace call will fail until this is fixed: ${redactDetail(describeResult(probe))}`,
+    );
+    console.error(
+      "[upstream] a 403 here is usually one of two things, and the upstream discards which: the Drive/Docs/Sheets API is not enabled on the OAuth client's Google Cloud PROJECT, or consent did not grant that scope. Check the project first — `gcloud services list --enabled` is authoritative, a live probe is not.",
+    );
+    google.probe({
+      ok: false,
+      rejected: resultText(probe).includes("invalid_grant"),
+      detail: describeResult(probe),
+    });
+    return;
+  }
+  console.log("[upstream] credential verified");
+  google.probe({ ok: true });
 }

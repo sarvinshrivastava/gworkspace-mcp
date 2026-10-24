@@ -7,7 +7,7 @@ import { ScopeResolver } from "../enforce/resolver.js";
 import { SubtreeCache } from "../enforce/search.js";
 import { DEFAULT_GRANTS } from "../policy/derive.js";
 import type { AgentContext } from "../policy/auth.js";
-import { FakeDrive, quietly, retryable } from "./helpers.js";
+import { FakeDrive, oauthRejected, quietly, retryable, serviceRejected } from "./helpers.js";
 
 function setup() {
   const drive = new FakeDrive();
@@ -270,4 +270,64 @@ test("updateEvent: an event with guests keeps its words; its time may move", asy
   assert.equal(reasonOf((await quietly(() => planCall(unconfined, "updateEvent", { eventId: "just-me", summary: "x" }, deps))).result), "event_unverifiable");
   // No eventId: nothing to look up; the upstream's schema rejects the call.
   assert.equal(reasonOf(await planCall(unconfined, "updateEvent", { summary: "x" }, deps)), "relay");
+});
+
+const denied = (p: Plan) => {
+  assert.equal(p.kind, "deny");
+  return p as Extract<Plan, { kind: "deny" }>;
+};
+
+test("a credential rejection is denied with the do-not-retry message on every Drive path", async () => {
+  const { deps, drive } = setup();
+  drive.errors.set("doc-in-F-001", oauthRejected());
+  const read = denied(await planCall(confined(), "readDocument", { documentId: "doc-in-F-001" }, deps));
+  assert.equal(read.reason, "credential_rejected");
+  assert.equal("category" in read && read.category, "invalid_grant");
+  assert.match(read.message, /^Google access rejected \(invalid_grant\) — do not retry/);
+
+  const primary = setup();
+  primary.drive.errors.set("scope-F-0001", oauthRejected());
+  const create = denied(await planCall(confined(), "createDocument", { title: "t" }, primary.deps));
+  assert.equal(create.reason, "credential_rejected");
+  assert.equal("category" in create && create.category, "invalid_grant");
+
+  const roots = setup();
+  roots.drive.errors.set("scope-F-0001", serviceRejected("drive"));
+  const search = denied(await planCall(confined(), "searchDriveFiles", { query: "x" }, roots.deps));
+  assert.equal(search.reason, "credential_rejected");
+  assert.equal("category" in search && search.category, "drive accessNotConfigured");
+});
+
+test("a transient failure stays drive_error with its category and the try-again message", async () => {
+  const { deps, drive } = setup();
+  drive.errors.set("doc-in-F-001", retryable());
+  const plan = denied(await planCall(confined(), "readDocument", { documentId: "doc-in-F-001" }, deps));
+  assert.equal(plan.reason, "drive_error");
+  assert.equal("category" in plan && plan.category, "HTTP 503");
+  assert.match(plan.message, /try again/);
+});
+
+test("no Drive client on search is drive_error unavailable", async () => {
+  const { deps } = setup();
+  const plan = denied(await planCall(confined(), "searchDriveFiles", { query: "x" }, { ...deps, drive: () => null }));
+  assert.equal(plan.reason, "drive_error");
+  assert.equal("category" in plan && plan.category, "unavailable");
+});
+
+test("updateEvent: the guest check tells a dead credential, a Calendar rejection and a blip apart", async () => {
+  const { deps, drive } = setup();
+  const args = { eventId: "just-me", summary: "x" };
+  drive.eventError = oauthRejected();
+  const dead = denied((await quietly(() => planCall(unconfined, "updateEvent", args, deps))).result);
+  assert.equal(dead.reason, "credential_rejected");
+  assert.equal("category" in dead && dead.category, "invalid_grant");
+
+  drive.eventError = serviceRejected("calendar");
+  const calendar = denied((await quietly(() => planCall(unconfined, "updateEvent", args, deps))).result);
+  assert.equal(calendar.reason, "calendar_rejected");
+  assert.equal(calendar.detail, "calendar accessNotConfigured");
+  assert.match(calendar.message, /\(calendar accessNotConfigured\) — do not retry/);
+
+  drive.eventError = retryable();
+  assert.equal(reasonOf((await quietly(() => planCall(unconfined, "updateEvent", args, deps))).result), "event_unverifiable");
 });

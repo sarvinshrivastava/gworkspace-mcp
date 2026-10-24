@@ -12,7 +12,8 @@ import type { CallToolResult } from "@modelcontextprotocol/server";
 import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
 
 import type { Audit } from "./audit.js";
-import { DriveError } from "./drive/client.js";
+import { DriveError, categoryOf, rejectionDetail } from "./drive/client.js";
+import type { GoogleHealth } from "./drive/health.js";
 import { denyMessage, planCall, type PipelineDeps } from "./enforce/pipeline.js";
 import { ScopeTooLarge } from "./enforce/search.js";
 import { errorMessage } from "./errors.js";
@@ -35,6 +36,8 @@ export type GatewayDeps = {
   housekeeping: () => Housekeeping | null;
   /** pipeline-runner's bearer for /internal/*; "" when the vault has none. */
   plrToken: () => string;
+  /** What the gateway knows about Google; fed here, shown in /healthz. */
+  google: GoogleHealth;
 };
 
 const fail = (why: string): CallToolResult => ({
@@ -80,6 +83,8 @@ export function createServer(ctx: AgentContext, deps: GatewayDeps): McpServer {
         const upstream = deps.upstream.client;
         if (!upstream) {
           audit?.tool(ctx, tool.name, "error", "upstream_down", []);
+          // Also what retries a push that could not be delivered at the exit.
+          deps.google.upstreamDown();
           return fail("the Workspace server has exited.");
         }
 
@@ -90,6 +95,16 @@ export function createServer(ctx: AgentContext, deps: GatewayDeps): McpServer {
 
           if (plan.kind === "deny") {
             audit?.tool(ctx, tool.name, "deny", plan.reason, plan.resources);
+            // calendar_rejected is audited and returned, and feeds nothing:
+            // Calendar says nothing about whether Drive works.
+            if (plan.reason === "drive_error" || plan.reason === "credential_rejected") {
+              deps.google.logDrive(tool.name, plan.reason, plan.category, plan.detail);
+              deps.google.failure(
+                plan.reason === "credential_rejected" ? "rejected" : "transient",
+                plan.category,
+                plan.detail ?? plan.reason,
+              );
+            }
             return fail(plan.message);
           }
 
@@ -103,10 +118,22 @@ export function createServer(ctx: AgentContext, deps: GatewayDeps): McpServer {
                 audit?.tool(ctx, tool.name, "deny", "too_large", plan.resources);
                 return fail(denyMessage("too_large"));
               }
+              if (error instanceof DriveError && error.rejection && error.source !== "calendar") {
+                const category = categoryOf(error);
+                const detail = errorMessage(error);
+                audit?.tool(ctx, tool.name, "deny", "credential_rejected", plan.resources);
+                deps.google.logDrive(tool.name, "credential_rejected", category, detail);
+                deps.google.failure("rejected", category, detail);
+                return fail(denyMessage("credential_rejected", undefined, rejectionDetail(error)));
+              }
               // Drive not answering (rate limit, 5xx, timeout): "try again",
               // as everywhere else — never Drive's raw status text.
               if ((error instanceof DriveError && error.retryable) || isAbort(error)) {
+                const category = categoryOf(error);
+                const detail = errorMessage(error);
                 audit?.tool(ctx, tool.name, "deny", "drive_error", plan.resources);
+                deps.google.logDrive(tool.name, "drive_error", category, detail);
+                deps.google.failure("transient", category, detail);
                 return fail(denyMessage("drive_error"));
               }
               throw error;
@@ -156,6 +183,9 @@ export function createMcpApp(deps: GatewayDeps): express.Express {
       tools: deps.upstream.exposedTools.length,
       upstreamTools: deps.upstream.upstreamToolCount,
       ...deps.health(),
+      // A field only: the status above stays tied to the child, so autoheal
+      // cannot restart-loop the container over a Google outage.
+      google: deps.google.snapshot(),
     });
   });
 

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { ScopeResolver } from "../enforce/resolver.js";
-import { FakeDrive, forbidden, retryable } from "./helpers.js";
+import { FakeDrive, forbidden, oauthRejected, retryable, serviceRejected } from "./helpers.js";
 
 /** root ─ F (scope) ─ sub ─ doc ; root ─ other ─ outsideDoc */
 function tree() {
@@ -168,4 +168,44 @@ test("E8: one cache serves agents with different scopes without leaking verdicts
   assert.deepEqual(await r.check("doc-in-F-001", other, false), { ok: false, reason: "outside" });
   assert.equal((await r.check("doc-outside1", other, false)).ok, true);
   assert.deepEqual(await r.check("doc-outside1", F, false), { ok: false, reason: "outside" });
+});
+
+test("a rejection on the target or on a parent is credential_rejected with its category, never not_found", async () => {
+  for (const error of [oauthRejected(), oauthRejected("HTTP 403", 403), serviceRejected("drive")]) {
+    for (const failing of ["doc-in-sub-1", "sub-folder-1"]) {
+      const drive = tree();
+      drive.errors.set(failing, error);
+      const verdict = await new ScopeResolver(() => drive).check("doc-in-sub-1", F, true);
+      assert.equal(verdict.ok, false);
+      assert.equal((verdict as { reason: string }).reason, "credential_rejected", failing);
+      const category = (verdict as { category: string }).category;
+      assert.equal(category, error.source === "oauth" ? error.rejection : `drive ${error.rejection}`);
+    }
+  }
+});
+
+test("a transient failure keeps drive_error with its category; a plain 403 and a 404 stay not_found", async () => {
+  const drive = tree();
+  drive.errors.set("doc-in-F-001", retryable());
+  assert.deepEqual(await new ScopeResolver(() => drive).check("doc-in-F-001", F, true), {
+    ok: false,
+    reason: "drive_error",
+    category: "HTTP 503",
+    detail: "Drive HTTP 503",
+  });
+  const plain = tree();
+  plain.errors.set("doc-in-F-001", forbidden());
+  assert.deepEqual(await new ScopeResolver(() => plain).check("doc-in-F-001", F, true), { ok: false, reason: "not_found" });
+});
+
+test("a calendar-source rejection is never a definite no and never a credential rejection", async () => {
+  const drive = tree();
+  drive.errors.set("doc-in-F-001", serviceRejected("calendar"));
+  const verdict = await new ScopeResolver(() => drive).check("doc-in-F-001", F, true);
+  assert.equal((verdict as { reason: string }).reason, "drive_error");
+});
+
+test("no Drive client gives drive_error with category unavailable", async () => {
+  const verdict = await new ScopeResolver(() => null).check("doc-in-F-001", F, true);
+  assert.deepEqual(verdict, { ok: false, reason: "drive_error", category: "unavailable", detail: "not ready" });
 });

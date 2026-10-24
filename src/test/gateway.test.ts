@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import type { Server } from "node:http";
 
 import { Audit } from "../audit.js";
+import { GoogleHealth } from "../drive/health.js";
+import type { DriveClient } from "../drive/client.js";
 import { ScopeResolver } from "../enforce/resolver.js";
 import { SubtreeCache } from "../enforce/search.js";
 import { createMcpApp, type GatewayDeps } from "../gateway.js";
@@ -15,9 +17,18 @@ import {
 import { makeAuthenticator } from "../policy/auth.js";
 import { DEFAULT_GRANTS } from "../policy/derive.js";
 import { mintToken } from "../policy/tokens.js";
+import { DriveClient as RealDriveClient } from "../drive/client.js";
+import type { BrokenKind, Notice } from "../drive/health.js";
+import { makeBroadcaster } from "../notify.js";
 import {
   FakeDrive,
   retryable,
+  oauthRejected,
+  serviceRejected,
+  fakeFetch,
+  json,
+  tokenOk,
+  creds,
   FakeUpstream,
   TODAYS_TOOLS,
   callTool,
@@ -39,6 +50,9 @@ async function boot(
     withheld?: { scoped: Set<string>; all: Set<string> };
     housekeeping?: Housekeeping | null;
     plrToken?: string;
+    google?: GoogleHealth;
+    /** Replaces the Drive the resolver, subtree cache and pipeline all use; null = not ready. */
+    drive?: DriveClient | null;
   } = {},
 ) {
   const store = tempStore();
@@ -52,17 +66,20 @@ async function boot(
   const upstreamClient = new FakeUpstream();
   const upstream = fakeUpstreamState(opts.withUpstream === false ? null : upstreamClient);
   if (opts.withheld) upstream.withheld = opts.withheld;
-  const subtree = new SubtreeCache(() => drive);
+  const driveOf = () => (opts.drive === undefined ? drive : opts.drive);
+  const subtree = new SubtreeCache(driveOf);
+  const google = opts.google ?? new GoogleHealth();
   let ready = opts.ready ?? true;
   const deps: GatewayDeps = {
     authenticate: () => makeAuthenticator(store, () => "legacy-token"),
     audit: () => audit,
-    pipeline: { resolver: new ScopeResolver(() => drive), subtree, drive: () => drive },
+    pipeline: { resolver: new ScopeResolver(driveOf), subtree, drive: driveOf },
     upstream,
     ready: () => ready,
     health: () => ({ db: true, auditErrors: audit.errors }),
     housekeeping: () => opts.housekeeping ?? null,
     plrToken: () => opts.plrToken ?? "",
+    google,
   };
   const { url, server } = await listen(createMcpApp(deps));
   servers.push(server);
@@ -74,7 +91,7 @@ async function boot(
     const id = store.insertToken(slug, t.hash, t.prefix, "");
     return { token: t.plaintext, id };
   };
-  return { url, store, audit, drive, upstreamClient, upstream, deps, agent, setReady: (v: boolean) => (ready = v) };
+  return { url, store, audit, drive, google, upstreamClient, upstream, deps, agent, setReady: (v: boolean) => (ready = v) };
 }
 
 const toolNames = (reply: { body: any }) => reply.body.result.tools.map((t: { name: string }) => t.name);
@@ -255,7 +272,7 @@ test("a Drive outage during a served search is 'try again', audited as drive_err
   const { url, agent, drive, store } = await boot();
   const { token } = agent("a1", DEFAULT_GRANTS, "scope-F-0001");
   drive.listError = retryable();
-  const reply = await callTool(url, token, "searchDriveFiles", { query: "doc" });
+  const { result: reply } = await quietly(() => callTool(url, token, "searchDriveFiles", { query: "doc" }));
   assert.equal(reply.body.result.isError, true);
   assert.match(reply.body.result.content[0].text, /try again/);
   assert.doesNotMatch(reply.body.result.content[0].text, /503/);
@@ -273,7 +290,7 @@ test("an oversized scope is denied as too_large", async () => {
 
 test("a call while the child is down is still audited", async () => {
   const { url, store } = await boot({ withUpstream: false });
-  await callTool(url, "legacy-token", "readDocument", { documentId: "doc-in-F-001" });
+  await quietly(() => callTool(url, "legacy-token", "readDocument", { documentId: "doc-in-F-001" }));
   assert.equal(store.queryAudit({ agent: "default", limit: 1 })[0]!.reason, "upstream_down");
 });
 
@@ -490,4 +507,195 @@ test("internal: a call during the boot run gets the boot run's result", async ()
   assert.equal(reply.status, 200);
   assert.deepEqual(reply.body, fromBoot);
   assert.equal(backups, 1);
+});
+
+// --- Google health: what each deny path tells the tracker ---------------------
+
+function watched(opts: Parameters<typeof boot>[0] = {}) {
+  let now = 1_000_000;
+  const sent: Array<{ kind: BrokenKind; notice: Notice }> = [];
+  const google = new GoogleHealth({ now: () => now, threshold: 1, minSpanMs: 0 });
+  google.setBroadcast((kind, notice) => sent.push({ kind, notice }));
+  return { google, sent, tick: (ms: number) => (now += ms), now: () => now, boot: (extra: Parameters<typeof boot>[0] = {}) => boot({ ...opts, ...extra, google }) };
+}
+
+const textOf = (reply: { body: any }) => reply.body.result.content[0].text as string;
+
+test("a rejected credential on every deny path pushes (invalid_grant), never (network)", async () => {
+  const cases: Array<{ tool: string; args: Record<string, unknown>; fail: (d: FakeDrive) => void; legacy?: boolean }> = [
+    { tool: "readDocument", args: { documentId: "doc-in-F-001" }, fail: (d) => d.errors.set("doc-in-F-001", oauthRejected()) },
+    { tool: "createDocument", args: { title: "t" }, fail: (d) => d.errors.set("scope-F-0001", oauthRejected()) },
+    { tool: "searchDriveFiles", args: { query: "doc" }, fail: (d) => d.errors.set("scope-F-0001", oauthRejected()) },
+    { tool: "updateEvent", args: { eventId: "e1", summary: "x" }, fail: (d) => (d.eventError = oauthRejected()), legacy: true },
+  ];
+  for (const c of cases) {
+    const w = watched();
+    const { url, agent, drive } = await w.boot();
+    c.fail(drive);
+    const token = c.legacy ? "legacy-token" : agent("a1", DEFAULT_GRANTS, "scope-F-0001").token;
+    const { result: reply } = await quietly(() => callTool(url, token, c.tool, c.args));
+    assert.match(textOf(reply), /^Failed: Google access rejected \(invalid_grant\) — do not retry/, c.tool);
+    assert.deepEqual(w.sent.map((s) => s.kind), ["rejected"], c.tool);
+    assert.match(w.sent[0]!.notice.message, /\(invalid_grant\)/, c.tool);
+    assert.doesNotMatch(w.sent[0]!.notice.message, /network/, c.tool);
+    assert.equal(w.google.snapshot().state, "rejected", c.tool);
+  }
+});
+
+test("a transient failure is try-again and its category reaches the failing push", async () => {
+  const w = watched();
+  const { url, agent, drive } = await w.boot();
+  const { token } = agent("a1", DEFAULT_GRANTS, "scope-F-0001");
+  drive.errors.set("doc-in-F-001", retryable());
+  const { result: reply } = await quietly(() => callTool(url, token, "readDocument", { documentId: "doc-in-F-001" }));
+  assert.match(textOf(reply), /try again/);
+  assert.match(w.sent[0]!.notice.message, /Last: HTTP 503\./);
+});
+
+test("no Drive client on search says Last: unavailable", async () => {
+  const w = watched({ drive: null });
+  const { url, agent } = await w.boot();
+  const { token } = agent("a1", DEFAULT_GRANTS, "scope-F-0001");
+  await quietly(() => callTool(url, token, "searchDriveFiles", { query: "doc" }));
+  assert.match(w.sent[0]!.notice.message, /Last: unavailable\./);
+});
+
+test("a refresh answered 503 says Last: HTTP 503", async () => {
+  const w = watched();
+  const { impl } = fakeFetch(() => json(503, {}));
+  const real = new RealDriveClient(creds, impl, 10_000, w.now, { onOk: (t) => w.google.ok(t) });
+  const { url, agent } = await w.boot({ drive: real });
+  const { token } = agent("a1", DEFAULT_GRANTS, "scope-F-0001");
+  await quietly(() => callTool(url, token, "readDocument", { documentId: "doc-in-F-001" }));
+  assert.match(w.sent[0]!.notice.message, /Last: HTTP 503\./);
+});
+
+test("a Calendar rejection is audited and returned but feeds nothing", async () => {
+  const w = watched();
+  const { url, drive, store } = await w.boot();
+  drive.eventError = serviceRejected("calendar");
+  const { result: reply, logs } = await quietly(() =>
+    callTool(url, "legacy-token", "updateEvent", { eventId: "e1", summary: "x" }),
+  );
+  assert.match(textOf(reply), /Google Calendar access rejected \(calendar accessNotConfigured\) — do not retry/);
+  assert.equal(store.queryAudit({ agent: "default", limit: 1 })[0]!.reason, "calendar_rejected");
+  assert.deepEqual(w.sent, []);
+  assert.equal(w.google.snapshot().state, "unknown");
+  assert.equal(w.google.snapshot().consecutiveFailures, 0);
+  assert.ok(!logs.some((l) => l.startsWith("[drive]")));
+});
+
+test("a credential error thrown while serving a search is handled, audited and pushed", async () => {
+  const w = watched();
+  const { url, agent, drive, store } = await w.boot();
+  const { token } = agent("a1", DEFAULT_GRANTS, "scope-F-0001");
+  drive.listError = oauthRejected();
+  const { result: reply } = await quietly(() => callTool(url, token, "searchDriveFiles", { query: "doc" }));
+  assert.match(textOf(reply), /^Failed: Google access rejected \(invalid_grant\) — do not retry/);
+  assert.equal(store.queryAudit({ agent: "a1", limit: 1 })[0]!.reason, "credential_rejected");
+  assert.deepEqual(w.sent.map((s) => s.kind), ["rejected"]);
+});
+
+test("a search that times out is a transient failure with category timeout", async () => {
+  const w = watched();
+  const { url, agent, drive } = await w.boot();
+  const { token } = agent("a1", DEFAULT_GRANTS, "scope-F-0001");
+  drive.listError = new DOMException("The operation timed out", "TimeoutError");
+  const { result: reply } = await quietly(() => callTool(url, token, "searchDriveFiles", { query: "doc" }));
+  assert.match(textOf(reply), /try again/);
+  assert.match(w.sent[0]!.notice.message, /Last: timeout\./);
+});
+
+test("end to end through a real DriveClient: only a request started after the rejection clears it", async () => {
+  const w = watched();
+  const file = (id: string, parents: string[]) => json(200, { id, name: id, mimeType: "x", parents, trashed: false });
+  let refreshStatus = 200;
+  let gate!: () => void;
+  const held = new Promise<void>((resolve) => (gate = resolve));
+  let aReached = false;
+  const { impl } = fakeFetch(async (url) => {
+    if (url.includes("oauth2")) return refreshStatus === 200 ? tokenOk() : json(refreshStatus, { error: "invalid_grant" });
+    if (url.includes("scope-F-0001")) return file("scope-F-0001", []);
+    if (url.includes("doc-aaaaaaaaaaa")) {
+      aReached = true;
+      await held;
+      return file("doc-aaaaaaaaaaa", ["scope-F-0001"]);
+    }
+    if (url.includes("doc-bbbbbbbbbbb")) return json(401, {});
+    return file(url.split("/files/")[1]!.split("?")[0]!, ["scope-F-0001"]);
+  });
+  const real = new RealDriveClient(creds, impl, 10_000, w.now, { onOk: (t) => w.google.ok(t) });
+  const { url, agent } = await w.boot({ drive: real });
+  const { token } = agent("a1", DEFAULT_GRANTS, "scope-F-0001");
+
+  const a = callTool(url, token, "readDocument", { documentId: "doc-aaaaaaaaaaa" });
+  while (!aReached) await new Promise((resolve) => setImmediate(resolve));
+  w.tick(10);
+  refreshStatus = 400;
+  const { result: b } = await quietly(() => callTool(url, token, "readDocument", { documentId: "doc-bbbbbbbbbbb" }));
+  assert.match(textOf(b), /Google access rejected \(invalid_grant\)/);
+  assert.equal(w.google.snapshot().state, "rejected");
+
+  w.tick(10);
+  gate();
+  await a;
+  assert.equal(w.google.snapshot().state, "rejected", "a response to a request that started before the rejection");
+
+  w.tick(10);
+  refreshStatus = 200;
+  const { result: c } = await quietly(() => callTool(url, token, "readDocument", { documentId: "doc-ccccccccccc" }));
+  assert.equal(c.body.result.isError, undefined);
+  assert.equal(w.google.snapshot().state, "ok");
+});
+
+test("a call with no upstream broadcasts upstream_down", async () => {
+  const w = watched({ withUpstream: false });
+  const { url } = await w.boot();
+  await quietly(() => callTool(url, "legacy-token", "readDocument", { documentId: "doc-in-F-001" }));
+  assert.deepEqual(w.sent.map((s) => s.kind), ["upstream_down"]);
+});
+
+test("a call before ready never reaches the tracker, even with no upstream", async () => {
+  const w = watched({ ready: false, withUpstream: false });
+  const { url } = await w.boot();
+  const reply = await callTool(url, "legacy-token", "readDocument", { documentId: "doc-in-F-001" });
+  assert.equal(reply.status, 503);
+  assert.deepEqual(w.sent, []);
+});
+
+test("a never-answering ntfy does not delay a rejected-credential denial", async () => {
+  const w = watched();
+  w.google.setBroadcast(makeBroadcaster(() => new Promise<boolean>(() => undefined)));
+  const { url, agent, drive } = await w.boot();
+  const { token } = agent("a1", DEFAULT_GRANTS, "scope-F-0001");
+  drive.errors.set("doc-in-F-001", oauthRejected());
+  const started = Date.now();
+  const { result: reply } = await quietly(() => callTool(url, token, "readDocument", { documentId: "doc-in-F-001" }));
+  assert.ok(Date.now() - started < 2000);
+  assert.match(textOf(reply), /do not retry/);
+});
+
+test("healthz keeps its keys, adds google, and its status ignores Google", async () => {
+  const w = watched();
+  const { url, drive, agent } = await w.boot();
+  const { token } = agent("a1", DEFAULT_GRANTS, "scope-F-0001");
+  drive.errors.set("doc-in-F-001", oauthRejected());
+  await quietly(() => callTool(url, token, "readDocument", { documentId: "doc-in-F-001" }));
+  const res = await fetch(`${url}/healthz`);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as Record<string, any>;
+  for (const key of ["db", "status", "tools", "upstreamTools", "auditErrors"]) assert.ok(key in body, key);
+  assert.equal(body.google.state, "rejected");
+  assert.deepEqual(Object.keys(body.google).sort(), ["consecutiveFailures", "probe", "since", "state"]);
+  const down = await (await watched({ withUpstream: false }).boot()).url;
+  assert.equal((await fetch(`${down}/healthz`)).status, 503);
+});
+
+test("the relay path counts nothing: an upstream isError leaves Google state alone", async () => {
+  const w = watched();
+  const { url, upstreamClient } = await w.boot();
+  upstreamClient.failing.add("readDocument");
+  await quietly(() => callTool(url, "legacy-token", "readDocument", { documentId: "doc-in-F-001" }));
+  assert.equal(w.google.snapshot().state, "unknown");
+  assert.deepEqual(w.sent, []);
 });

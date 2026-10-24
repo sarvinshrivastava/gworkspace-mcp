@@ -10,7 +10,7 @@
  * can therefore still be READ for up to the cache TTL, but never written.
  */
 
-import { DriveError, type DriveClient, type DriveFile } from "../drive/client.js";
+import { DriveError, categoryOf, rejectionDetail, type DriveClient, type DriveFile } from "../drive/client.js";
 import { errorMessage } from "../errors.js";
 
 export type DenyReason =
@@ -20,6 +20,8 @@ export type DenyReason =
   | "no_parents"
   | "too_deep"
   | "drive_error"
+  | "credential_rejected"
+  | "calendar_rejected"
   | "bad_id"
   | "no_scope"
   | "no_primary"
@@ -35,15 +37,36 @@ export type DenyReason =
   | "not_enabled"
   | "unmapped";
 
+/** The two denials that say Google, not the file, is the problem. They always carry a category. */
+export type DriveReason = "drive_error" | "credential_rejected";
+
 export type Verdict =
   | { ok: true; file: DriveFile }
-  | { ok: false; reason: DenyReason; detail?: string };
+  | { ok: false; reason: DriveReason; category: string; detail?: string }
+  | { ok: false; reason: Exclude<DenyReason, DriveReason>; detail?: string };
 
 const MAX_DEPTH = 32;
 
-/** A Drive answer that ends a path: gone, or not ours to see. */
+/** A Drive answer that ends a path: gone, or not ours to see. A rejection or a Calendar answer is not one. */
 const isDefiniteNo = (error: unknown) =>
-  error instanceof DriveError && !error.retryable && (error.status === 403 || error.status === 404);
+  error instanceof DriveError &&
+  error.source === "drive" &&
+  !error.rejection &&
+  !error.retryable &&
+  (error.status === 403 || error.status === 404);
+
+/** Google refused the credential or the API: retrying cannot help, and it is not the file's fault. */
+const rejection = (error: unknown): Verdict | null =>
+  error instanceof DriveError && error.rejection && error.source !== "calendar"
+    ? { ok: false, reason: "credential_rejected", category: categoryOf(error), detail: rejectionDetail(error) }
+    : null;
+
+const driveError = (error: unknown): Verdict => ({
+  ok: false,
+  reason: "drive_error",
+  category: categoryOf(error),
+  detail: errorMessage(error),
+});
 
 export class ScopeResolver {
   private cache = new Map<string, { file: DriveFile | null; at: number }>();
@@ -86,7 +109,7 @@ export class ScopeResolver {
   }
 
   async check(id: string, scopeIds: ReadonlySet<string>, live: boolean): Promise<Verdict> {
-    if (!this.drive()) return { ok: false, reason: "drive_error", detail: "not ready" };
+    if (!this.drive()) return { ok: false, reason: "drive_error", category: "unavailable", detail: "not ready" };
     let fetches = 0;
     const fetchNode = async (nodeId: string): Promise<DriveFile | null> => {
       fetches++;
@@ -97,8 +120,7 @@ export class ScopeResolver {
     try {
       target = await fetchNode(id);
     } catch (error) {
-      if (isDefiniteNo(error)) return { ok: false, reason: "not_found" };
-      return { ok: false, reason: "drive_error", detail: errorMessage(error) };
+      return rejection(error) ?? (isDefiniteNo(error) ? { ok: false, reason: "not_found" } : driveError(error));
     }
     if (!target) return { ok: false, reason: "not_found" };
     if (target.trashed) return { ok: false, reason: "trashed" };
@@ -127,8 +149,10 @@ export class ScopeResolver {
       } catch (error) {
         // A parent we may not see ends this path; Drive failing to answer ends
         // the whole check, because "try again" is the only honest result.
+        const refused = rejection(error);
+        if (refused) return refused;
         if (isDefiniteNo(error)) continue;
-        return { ok: false, reason: "drive_error", detail: errorMessage(error) };
+        return driveError(error);
       }
       if (!node) continue;
       if (node.trashed) {

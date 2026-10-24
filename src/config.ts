@@ -66,6 +66,9 @@ export const config = {
   configHome: env("CONFIG_HOME", "/data/config"),
   tokenDir: env("TOKEN_DIR", "/data/config/google-docs-mcp"),
 
+  /** Where broken-only pushes go. The topic itself comes from the vault. */
+  ntfyBase: env("NTFY_BASE", "https://ntfy.sh"),
+
   /** The child's own V8 heap budget. Two processes share one cgroup. */
   childHeapMb: Number(env("CHILD_HEAP_MB", "192")),
 

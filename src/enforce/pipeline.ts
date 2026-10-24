@@ -7,17 +7,18 @@
  * unconfined agents are then a plain relay, exactly as before policies.
  */
 
-import { FOLDER_MIME, type DriveClient } from "../drive/client.js";
+import { DriveError, FOLDER_MIME, categoryOf, rejectionDetail, type DriveClient } from "../drive/client.js";
 import { CALENDAR_TOOLS } from "../policy/derive.js";
 import type { AgentContext } from "../policy/auth.js";
 import { MAX_RESOURCES } from "../policy/store.js";
 import { ALL_AGENT_GUARDS, EVENT_TIME_ONLY_KEYS, ID_RE } from "./guards.js";
 import { errorMessage } from "../errors.js";
-import type { DenyReason, ScopeResolver, Verdict } from "./resolver.js";
+import type { DenyReason, DriveReason, ScopeResolver, Verdict } from "./resolver.js";
 import { scopedSearchDriveFiles, type SubtreeCache } from "./search.js";
 
 export type Plan =
-  | { kind: "deny"; message: string; reason: DenyReason; resources: string[] }
+  | { kind: "deny"; message: string; reason: DriveReason; category: string; detail?: string; resources: string[] }
+  | { kind: "deny"; message: string; reason: Exclude<DenyReason, DriveReason>; detail?: string; resources: string[] }
   | {
       kind: "relay";
       args: Record<string, unknown>;
@@ -61,7 +62,7 @@ export const CREATE_TOOLS: ReadonlySet<string> = new Set([
   "createFolder",
 ]);
 
-export function denyMessage(reason: DenyReason, id?: string): string {
+export function denyMessage(reason: DenyReason, id?: string, detail?: string): string {
   switch (reason) {
     case "not_found":
     case "outside":
@@ -71,6 +72,10 @@ export function denyMessage(reason: DenyReason, id?: string): string {
       return `Denied: \`${id ?? "that file"}\` was not found or is outside this agent's folder scope.`;
     case "drive_error":
       return "Could not verify the folder scope right now — try again.";
+    case "credential_rejected":
+      return `Google access rejected${detail ? ` (${detail})` : ""} — do not retry. The Workspace owner must re-consent and update GOOGLE_TOKEN_JSON, or enable the API.`;
+    case "calendar_rejected":
+      return `Google Calendar access rejected${detail ? ` (${detail})` : ""} — do not retry. The Workspace owner must enable the Calendar API or grant the Calendar scope.`;
     case "no_scope":
       return "This agent has no Drive folder assigned yet.";
     case "bad_id":
@@ -101,12 +106,32 @@ export function denyMessage(reason: DenyReason, id?: string): string {
   }
 }
 
-const deny = (reason: DenyReason, resources: string[], id?: string): Plan => ({
+const deny = (
+  reason: Exclude<DenyReason, DriveReason>,
+  resources: string[],
+  id?: string,
+  detail?: string,
+): Plan => ({
   kind: "deny",
   reason,
-  message: denyMessage(reason, id),
+  message: denyMessage(reason, id, detail),
+  ...(detail === undefined ? {} : { detail }),
   resources: resources.slice(0, MAX_RESOURCES),
 });
+
+/** A denial because Google could not answer or refused; the category says which, and cannot be left out. */
+const denyDrive = (reason: DriveReason, resources: string[], category: string, detail?: string): Plan => ({
+  kind: "deny",
+  reason,
+  category,
+  message: denyMessage(reason, undefined, reason === "credential_rejected" ? detail : undefined),
+  ...(detail === undefined ? {} : { detail }),
+  resources: resources.slice(0, MAX_RESOURCES),
+});
+
+/** Google could not answer or refused: never "your folder is gone". */
+const isDriveVerdict = (v: Verdict): v is Extract<Verdict, { reason: DriveReason }> =>
+  !v.ok && (v.reason === "drive_error" || v.reason === "credential_rejected");
 
 const validId = (value: unknown): value is string =>
   typeof value === "string" && ID_RE.test(value);
@@ -148,6 +173,11 @@ export async function planCall(
       // Fail closed, transient or not: an unchecked event may have guests.
       // Logged, because a permanent cause (no Calendar scope) looks the same.
       console.error(`[guard] could not read an event's guests: ${errorMessage(error)}`);
+      if (error instanceof DriveError && error.rejection) {
+        return error.source === "calendar"
+          ? deny("calendar_rejected", [], undefined, rejectionDetail(error))
+          : denyDrive("credential_rejected", [], categoryOf(error), rejectionDetail(error));
+      }
       return deny("event_unverifiable", []);
     }
     if (guests?.length) return deny("event_has_guests", []);
@@ -174,7 +204,10 @@ export async function planCall(
   const primary = ctx.scopes.find((s) => s.isPrimary)?.folderId;
   const r = deps.resolver;
 
-  const verdictDeny = (v: Verdict & { ok: false }, id: string): Plan => deny(v.reason, [id], id);
+  const verdictDeny = (v: Verdict & { ok: false }, id: string): Plan =>
+    isDriveVerdict(v)
+      ? denyDrive(v.reason, [id], v.category, v.detail)
+      : deny(v.reason, [id], id);
 
   /** A folder argument the agent supplied: valid, in scope, and a folder. */
   const checkFolder = async (value: unknown, live: boolean): Promise<Plan | string> => {
@@ -190,7 +223,7 @@ export async function planCall(
     if (!primary) return deny("no_primary", []);
     const v = await r.check(primary, scopeIds, live);
     // Drive not answering is "try again", never "your folder is gone".
-    if (!v.ok && v.reason === "drive_error") return deny("drive_error", [primary]);
+    if (isDriveVerdict(v)) return denyDrive(v.reason, [primary], v.category, v.detail);
     if (!v.ok || v.file.mimeType !== FOLDER_MIME) return deny("primary_unavailable", [primary]);
     return primary;
   };
@@ -263,12 +296,12 @@ export async function planCall(
       for (const id of scopeIds) {
         const v = await r.check(id, scopeIds, false);
         if (v.ok) roots.push(id);
-        else if (v.reason === "drive_error") return deny("drive_error", [id]);
+        else if (isDriveVerdict(v)) return denyDrive(v.reason, [id], v.category, v.detail);
       }
       if (!roots.length) return deny("primary_unavailable", [...scopeIds]);
     }
     const drive = deps.drive();
-    if (!drive) return deny("drive_error", []);
+    if (!drive) return denyDrive("drive_error", [], "unavailable", "not ready");
     const { folderId: _ignored, ...searchArgs } = args;
     return {
       kind: "serve",

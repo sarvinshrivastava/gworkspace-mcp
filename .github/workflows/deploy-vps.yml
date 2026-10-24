@@ -299,6 +299,8 @@ jobs:
                 case "$verdict" in
                   *"credential verified"*) echo "Google credential verified" ;;
                   "") echo "::warning::the Google credential check did not report within 60s — check docker logs" ;;
+                  *"CREDENTIAL CHECK skipped"*) echo "::warning::the Google credential check was skipped (the Workspace server was not connected) — check docker logs" ;;
+                  *"CREDENTIAL CHECK could not run"*) echo "::warning::the Google credential check could not run — check docker logs" ;;
                   *) echo "::warning::${verdict#*] } — the service is up but every Workspace call will fail until GOOGLE_TOKEN_JSON is fixed" ;;
                 esac
                 exit 0

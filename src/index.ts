@@ -22,6 +22,8 @@ import { makeAllowedSources } from "./admin/security.js";
 import { Audit } from "./audit.js";
 import { config, vaultFetch, vaultFetchOptional } from "./config.js";
 import { DriveClient } from "./drive/client.js";
+import { GoogleHealth } from "./drive/health.js";
+import { wireGoogle } from "./google.js";
 import { ScopeResolver } from "./enforce/resolver.js";
 import { SubtreeCache } from "./enforce/search.js";
 import { errorMessage } from "./errors.js";
@@ -36,8 +38,8 @@ import {
 import { DEFAULT_GRANTS } from "./policy/derive.js";
 import { OpenError, openPolicyStore, type PolicyStore } from "./policy/store.js";
 import {
+  applyProbe,
   connectUpstream,
-  describeResult,
   normaliseToken,
   refreshTokenOf,
   upstreamState,
@@ -51,6 +53,7 @@ let plrToken = "";
 let legacyToken = "";
 let passwordHash: string | null = null;
 let drive: DriveClient | null = null;
+const google = new GoogleHealth();
 let ready = false;
 
 /**
@@ -109,6 +112,7 @@ async function main() {
     health: () => ({ db: store !== null, auditErrors: audit?.errors ?? 0 }),
     housekeeping: () => housekeeping,
     plrToken: () => plrToken,
+    google,
   });
 
   const adminApp = createAdminApp({
@@ -145,7 +149,7 @@ async function main() {
   // Concurrently: sequential fetches against a slow vault is n x (4 attempts x
   // 15s timeout + backoff), which outlasts both start_period and the deploy's
   // health wait.
-  const [token, clientId, clientSecret, tokenJson, hash, plr] = await Promise.all([
+  const [token, clientId, clientSecret, tokenJson, hash, plr, ntfyTopic] = await Promise.all([
     vaultFetch("GWORKSPACE_MCP_TOKEN"),
     vaultFetch("GOOGLE_CLIENT_ID"),
     vaultFetch("GOOGLE_CLIENT_SECRET"),
@@ -155,6 +159,10 @@ async function main() {
     // (HOUSEKEEPING_SCHEDULER=internal) still runs. Read once, like the rest —
     // adding the key later needs a restart.
     vaultFetchOptional("GWORKSPACE_PLR_TOKEN"),
+    // Optional: the one shared ntfy topic for broken-only pushes. Without it
+    // the service only logs. The topic is a credential on public ntfy.sh, so it
+    // lives in the vault and is never logged. Read once, like the rest.
+    vaultFetchOptional("GWORKSPACE_NTFY_TOPIC"),
   ]);
   legacyToken = token;
   passwordHash = hash;
@@ -178,9 +186,16 @@ async function main() {
   // child; it never leaves this process.
   // Normalised once here; connectUpstream's own pass is then silent.
   const normalised = normaliseToken(tokenJson);
-  drive = new DriveClient({ clientId, clientSecret, refreshToken: refreshTokenOf(normalised) });
+  // Before connectUpstream: the probe below and any later exit of the child
+  // push through the broadcaster this wires.
+  const wired = wireGoogle(google, {
+    creds: { clientId, clientSecret, refreshToken: refreshTokenOf(normalised) },
+    ntfyTopic,
+    ntfyBase: config.ntfyBase,
+  });
+  drive = wired.drive;
 
-  await connectUpstream({ clientId, clientSecret, tokenJson: normalised });
+  await connectUpstream({ clientId, clientSecret, tokenJson: normalised }, wired.onExit);
   ready = true;
   console.log(
     `exposing: ${upstreamState.exposedTools.map((t) => t.name).join(", ") || "(none)"}`,
@@ -196,18 +211,8 @@ async function main() {
       arguments: { maxResults: 1 },
     });
     // callTool RESOLVES with isError: true for a tool failure — it only throws
-    // on a transport failure. Checking the promise alone reported "verified"
-    // for a call that had actually come back 403.
-    if (probe && (probe as { isError?: boolean }).isError) {
-      console.error(
-        `[upstream] CREDENTIAL CHECK FAILED — every Workspace call will fail until this is fixed: ${describeResult(probe)}`,
-      );
-      console.error(
-        "[upstream] a 403 here is usually one of two things, and the upstream discards which: the Drive/Docs/Sheets API is not enabled on the OAuth client's Google Cloud PROJECT, or consent did not grant that scope. Check the project first — `gcloud services list --enabled` is authoritative, a live probe is not.",
-      );
-    } else {
-      console.log("[upstream] credential verified");
-    }
+    // on a transport failure, and applyProbe reads the result accordingly.
+    applyProbe(probe, google);
   } catch (error) {
     console.error(
       `[upstream] CREDENTIAL CHECK could not run: ${errorMessage(error)}`,
