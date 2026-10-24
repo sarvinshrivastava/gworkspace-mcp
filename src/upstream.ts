@@ -15,7 +15,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 import { config } from "./config.js";
 import type { GoogleHealth } from "./drive/health.js";
-import { SECRETISH, errorMessage } from "./errors.js";
+import { SECRETISH, errorMessage, redactDetail } from "./errors.js";
 
 export type UpstreamTool = {
   name: string;
@@ -377,7 +377,7 @@ export function applyProbe(probe: unknown, google: GoogleHealth): void {
   }
   if ((probe as { isError?: boolean }).isError) {
     console.error(
-      `[upstream] CREDENTIAL CHECK FAILED — every Workspace call will fail until this is fixed: ${describeResult(probe)}`,
+      `[upstream] CREDENTIAL CHECK FAILED — every Workspace call will fail until this is fixed: ${redactDetail(describeResult(probe))}`,
     );
     console.error(
       "[upstream] a 403 here is usually one of two things, and the upstream discards which: the Drive/Docs/Sheets API is not enabled on the OAuth client's Google Cloud PROJECT, or consent did not grant that scope. Check the project first — `gcloud services list --enabled` is authoritative, a live probe is not.",

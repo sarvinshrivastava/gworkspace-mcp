@@ -137,7 +137,7 @@ export class DriveClient {
     } catch (error) {
       throw new DriveError(0, true, `token refresh failed: ${errorMessage(error)}`, undefined, "oauth");
     }
-    // The status only. The body of a failed refresh can echo the request.
+    // Only `error` is read, and only as a bare code: `error_description` can echo the request.
     if (!res.ok) {
       const transient = res.status >= 500 || res.status === 429 || res.status === 408;
       throw new DriveError(

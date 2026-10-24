@@ -55,6 +55,8 @@ export function notifierFrom(
         },
         body: notice.message,
         signal: AbortSignal.timeout(timeoutMs),
+        // The https check on the base must not be undoable by a server's 30x.
+        redirect: "error",
       });
       void res.body?.cancel().catch(() => undefined);
       if (!res.ok) {

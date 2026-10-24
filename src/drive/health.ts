@@ -6,7 +6,7 @@
  * In-memory: a restart resets it to `unknown` and the boot probe re-seeds it.
  */
 
-import { SECRETISH } from "../errors.js";
+import { redactDetail } from "../errors.js";
 
 export type GoogleState = "unknown" | "ok" | "failing" | "rejected";
 export type BrokenKind = "rejected" | "failing" | "probe" | "upstream_down";
@@ -24,12 +24,10 @@ type Options = {
 };
 
 const SAFE_CATEGORY = /^[A-Za-z0-9_ .-]{1,40}$/;
-const MAX_DETAIL = 300;
 
 const safeCategory = (category: string) => (SAFE_CATEGORY.test(category) ? category : "unknown");
 
-/** Log-only text: credential-shaped details are replaced, the rest capped. */
-const redact = (detail: string) => (SECRETISH.test(detail) ? "[redacted]" : detail.slice(0, MAX_DETAIL));
+const redact = redactDetail;
 
 export class GoogleHealth {
   private readonly now: () => number;
