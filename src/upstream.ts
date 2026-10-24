@@ -14,7 +14,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 import { config } from "./config.js";
-import { errorMessage } from "./errors.js";
+import { SECRETISH, errorMessage } from "./errors.js";
 
 export type UpstreamTool = {
   name: string;
@@ -60,11 +60,10 @@ export const upstreamState: UpstreamState = {
  * whose config carries the POST body, i.e. the client secret and the refresh
  * token. Piping it raw would write both into the container's json-file log.
  */
-function drainStderr(raw: unknown): void {
+export function drainStderr(raw: unknown): void {
   // The SDK types this as Stream; it is a PassThrough at runtime.
   const stream = raw as NodeJS.ReadableStream | null;
   if (!stream?.on) return;
-  const SECRETISH = /refresh_token|client_secret|access_token|Bearer\s|"token"/i;
   let carry = "";
   let dropped = 0;
   stream.setEncoding("utf8");
