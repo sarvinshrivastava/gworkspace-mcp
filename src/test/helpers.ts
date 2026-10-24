@@ -174,6 +174,12 @@ export class FakeDrive extends DriveClient {
 
 export const retryable = () => new DriveError(503, true, "Drive HTTP 503");
 export const forbidden = () => new DriveError(403, false, "Drive HTTP 403");
+/** A refresh the token endpoint refused: `invalid_grant`, or a bare `HTTP 403` category. */
+export const oauthRejected = (category = "invalid_grant", status = 400) =>
+  new DriveError(status, false, `token refresh failed: HTTP ${status}`, category, "oauth");
+/** A service-level 403 from Drive or Calendar (API off, scope missing). */
+export const serviceRejected = (source: "drive" | "calendar" = "drive") =>
+  new DriveError(403, false, "Drive HTTP 403 (accessNotConfigured)", "accessNotConfigured", source);
 
 // ---------------------------------------------------------------------------
 // MCP over HTTP: a fake upstream child and a client call that reads the SSE.
