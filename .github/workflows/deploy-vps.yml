@@ -313,7 +313,7 @@ jobs:
               # database and seeds the default agent, and every other agent,
               # token and grant is gone. --force-recreate makes this container's
               # log start at this deploy, restarts included.
-              if docker logs gworkspace-mcp 2>&1 | grep -q "\[db\] created the default agent"; then
+              if docker logs gworkspace-mcp 2>&1 | grep -q "^\[db\] created the default agent"; then
                 echo "::error::this boot created a fresh policy database: every agent, token and grant from before is gone. Expected only on a brand-new volume; otherwise check the gworkspace-state volume."
                 exit 1
               fi

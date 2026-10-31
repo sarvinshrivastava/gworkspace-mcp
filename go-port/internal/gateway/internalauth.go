@@ -119,7 +119,9 @@ func (g *internalGuard) ServeHTTP(w http.ResponseWriter, r *http.Request, next h
 		g.mu.Lock()
 		if _, logged := g.lastLog[source]; !logged {
 			g.lastLog[source] = at
-			fmt.Printf("[internal] rejected %s %s from %s\n", r.Method, r.URL.Path, orUnknown(source))
+			// %q: the decoded path is caller text. A newline in it would forge
+			// log lines, which the deploy greps and a failed run prints.
+			fmt.Printf("[internal] rejected %s %q from %s\n", r.Method, r.URL.Path, orUnknown(source))
 		}
 		g.mu.Unlock()
 		if g.onReject != nil {
