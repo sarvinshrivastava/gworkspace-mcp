@@ -1,0 +1,897 @@
+[
+  {
+    "name": "readDocument",
+    "description": "Reads the content of a Google Document. Returns plain text by default. Use format='markdown' to get formatted content suitable for editing and re-uploading with replaceDocumentWithMarkdown, or format='json' for the raw document structure.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "documentId": {
+          "type": "string",
+          "description": "The document ID — the long string between /d/ and /edit in a Google Docs URL."
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "text",
+            "json",
+            "markdown"
+          ],
+          "default": "text",
+          "description": "Output format: 'text' (plain text), 'json' (raw API structure, complex), 'markdown' (experimental conversion)."
+        },
+        "maxLength": {
+          "type": "number",
+          "description": "Maximum character limit for text output. If not specified, returns full document content. Use this to limit very large documents."
+        },
+        "tabId": {
+          "type": "string",
+          "description": "The ID of the specific tab to read. If not specified, reads the first tab (or legacy document.body for documents without tabs)."
+        }
+      },
+      "required": [
+        "documentId"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "appendText",
+    "description": "Appends plain text to the end of a document. For formatted content, use appendMarkdown instead.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "documentId": {
+          "type": "string",
+          "description": "The document ID — the long string between /d/ and /edit in a Google Docs URL."
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The plain text to append to the end of the document."
+        },
+        "addNewlineIfNeeded": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically add a newline before the appended text if the doc doesn't end with one."
+        },
+        "tabId": {
+          "type": "string",
+          "description": "The ID of the specific tab to append to. If not specified, appends to the first tab (or legacy document.body for documents without tabs)."
+        }
+      },
+      "required": [
+        "documentId",
+        "text"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "insertText",
+    "description": "Inserts text at a specific character index within a document. Use readDocument with format='json' to determine the correct index.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "documentId": {
+          "type": "string",
+          "description": "The document ID — the long string between /d/ and /edit in a Google Docs URL."
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The text to insert."
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based character index within the document body. Use readDocument with format='json' to inspect indices."
+        },
+        "tabId": {
+          "type": "string",
+          "description": "The ID of the specific tab to insert into. If not specified, inserts into the first tab (or legacy document.body for documents without tabs)."
+        }
+      },
+      "required": [
+        "documentId",
+        "text",
+        "index"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "findAndReplace",
+    "description": "Replaces all occurrences of a text string throughout the document (or a specific tab). Returns the number of replacements made. Use an empty replaceText to delete all matches.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "documentId": {
+          "type": "string",
+          "description": "The document ID — the long string between /d/ and /edit in a Google Docs URL."
+        },
+        "findText": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The text to search for in the document."
+        },
+        "replaceText": {
+          "type": "string",
+          "description": "The replacement text. Use an empty string to delete all occurrences."
+        },
+        "matchCase": {
+          "type": "boolean",
+          "description": "Whether the search should be case-sensitive. Defaults to false."
+        },
+        "tabId": {
+          "type": "string",
+          "description": "Scope replacement to a specific tab. If omitted, replaces across all tabs."
+        }
+      },
+      "required": [
+        "documentId",
+        "findText",
+        "replaceText"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "listDocuments",
+    "description": "Lists Google Documents in your Drive, optionally filtered by name or content. Use modifiedAfter to find recently changed documents.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "maxResults": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 20,
+          "description": "Maximum number of documents to return (1-100)."
+        },
+        "query": {
+          "type": "string",
+          "description": "Search query to filter documents by name or content."
+        },
+        "orderBy": {
+          "type": "string",
+          "enum": [
+            "name",
+            "modifiedTime",
+            "createdTime"
+          ],
+          "default": "modifiedTime",
+          "description": "Sort order for results."
+        },
+        "modifiedAfter": {
+          "type": "string",
+          "description": "Only return documents modified after this date (ISO 8601 format, e.g., \"2024-01-01\")."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "searchDocuments",
+    "description": "Searches for documents by name, content, or both. Use listDocuments for browsing and this tool for targeted queries.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Search term to find in document names or content."
+        },
+        "searchIn": {
+          "type": "string",
+          "enum": [
+            "name",
+            "content",
+            "both"
+          ],
+          "default": "both",
+          "description": "Where to search: document names, content, or both."
+        },
+        "maxResults": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50,
+          "default": 10,
+          "description": "Maximum number of results to return."
+        },
+        "modifiedAfter": {
+          "type": "string",
+          "description": "Only return documents modified after this date (ISO 8601 format, e.g., \"2024-01-01\")."
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "listDriveFiles",
+    "description": "Lists files across Google Drive with optional filtering by type, folder, and ownership. Unlike listDocuments (which only returns Google Docs), this tool works with all file types (Sheets, PDFs, images, folders, etc.) and supports sort direction and size-based ordering. Use mimeType shortcuts: \"document\", \"spreadsheet\", \"presentation\", \"folder\", \"form\", \"pdf\", \"zip\" or pass any full MIME type string.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "maxResults": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 20,
+          "description": "Maximum number of files to return (1-100)."
+        },
+        "mimeType": {
+          "type": "string",
+          "description": "Filter by file type. Shortcuts: \"document\", \"spreadsheet\", \"presentation\", \"folder\", \"form\", \"pdf\", \"zip\". Or pass a full MIME type (e.g. \"image/png\")."
+        },
+        "folderId": {
+          "type": "string",
+          "description": "Only return files directly inside this folder. Use \"root\" for the top-level Drive. Omit to search across all folders."
+        },
+        "orderBy": {
+          "type": "string",
+          "enum": [
+            "name",
+            "modifiedTime",
+            "createdTime",
+            "quotaBytesUsed"
+          ],
+          "default": "modifiedTime",
+          "description": "Field to sort results by. \"quotaBytesUsed\" sorts by file size (note: Google-native files report 0)."
+        },
+        "sortDirection": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "default": "desc",
+          "description": "Sort direction: \"asc\" for oldest/smallest first, \"desc\" for newest/largest first."
+        },
+        "ownedByMe": {
+          "type": "boolean",
+          "description": "If true, only return files owned by the authenticated user."
+        },
+        "sharedWithMe": {
+          "type": "boolean",
+          "description": "If true, only return files shared with the authenticated user (excludes files they own). Cannot be combined with ownedByMe."
+        },
+        "modifiedAfter": {
+          "type": "string",
+          "description": "Only return files modified after this date (ISO 8601 format, e.g. \"2024-01-01\")."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "searchDriveFiles",
+    "description": "Searches across all file types in Google Drive by name or content. Unlike searchDocuments (which only searches Google Docs), this tool finds Sheets, PDFs, presentations, folders, and any other Drive file. Supports filtering by MIME type, scoping to a specific folder subtree, controllable sort order, and pagination via pageToken.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Search term to find in file names or content."
+        },
+        "searchIn": {
+          "type": "string",
+          "enum": [
+            "name",
+            "content",
+            "both"
+          ],
+          "default": "both",
+          "description": "Where to search: \"name\" matches file titles only, \"content\" searches inside files, \"both\" searches names and content (default)."
+        },
+        "mimeType": {
+          "type": "string",
+          "description": "Restrict search to a specific file type. Shortcuts: \"document\", \"spreadsheet\", \"presentation\", \"folder\", \"form\", \"pdf\", \"zip\". Or pass a full MIME type string."
+        },
+        "folderId": {
+          "type": "string",
+          "description": "Restrict search to files inside this folder (and its subfolders). Use \"root\" for the top-level Drive. Omit to search all of Drive."
+        },
+        "orderBy": {
+          "type": "string",
+          "enum": [
+            "name",
+            "modifiedTime",
+            "createdTime"
+          ],
+          "default": "modifiedTime",
+          "description": "Field to sort results by."
+        },
+        "sortDirection": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "default": "desc",
+          "description": "Sort direction: \"asc\" for oldest first, \"desc\" for newest first (default)."
+        },
+        "maxResults": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 10,
+          "description": "Maximum number of results to return per page (1-100)."
+        },
+        "modifiedAfter": {
+          "type": "string",
+          "description": "Only return files modified after this date (ISO 8601 format, e.g. \"2024-01-01\")."
+        },
+        "pageToken": {
+          "type": "string",
+          "description": "Pagination token from a previous searchDriveFiles response. Pass this to retrieve the next page of results."
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "createFolder",
+    "description": "Creates a new folder in Google Drive. Optionally places it inside an existing parent folder.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name for the new folder."
+        },
+        "parentFolderId": {
+          "type": "string",
+          "description": "Parent folder ID. If not provided, creates folder in Drive root."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "createDocument",
+    "description": "Creates a new empty Google Document. Optionally places it in a specific folder and adds initial text content.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Title for the new document."
+        },
+        "parentFolderId": {
+          "type": "string",
+          "description": "ID of folder where document should be created. If not provided, creates in Drive root."
+        },
+        "initialContent": {
+          "type": "string",
+          "description": "Initial content to add to the document. By default, markdown syntax is converted to formatted Google Docs content (headings, bold, italic, links, lists, etc.)."
+        },
+        "contentFormat": {
+          "type": "string",
+          "enum": [
+            "markdown",
+            "raw"
+          ],
+          "default": "markdown",
+          "description": "How to interpret initialContent. 'markdown' (default) converts markdown to formatted Google Docs content. 'raw' inserts the text as-is without any conversion."
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "readSpreadsheet",
+    "description": "Reads data from a range in a spreadsheet. Returns rows as arrays. Use A1 notation for the range (e.g., \"Sheet1!A1:C10\").",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "spreadsheetId": {
+          "type": "string",
+          "description": "The spreadsheet ID — the long string between /d/ and /edit in a Google Sheets URL."
+        },
+        "range": {
+          "type": "string",
+          "description": "A1 notation range to read (e.g., \"A1:B10\" or \"Sheet1!A1:B10\")."
+        },
+        "valueRenderOption": {
+          "type": "string",
+          "enum": [
+            "FORMATTED_VALUE",
+            "UNFORMATTED_VALUE",
+            "FORMULA"
+          ],
+          "default": "FORMATTED_VALUE",
+          "description": "How values should be rendered in the output."
+        }
+      },
+      "required": [
+        "spreadsheetId",
+        "range"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "writeSpreadsheet",
+    "description": "Writes data to a range in a spreadsheet, overwriting existing values. Use appendRows to add data without overwriting.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "spreadsheetId": {
+          "type": "string",
+          "description": "The spreadsheet ID — the long string between /d/ and /edit in a Google Sheets URL."
+        },
+        "range": {
+          "type": "string",
+          "description": "A1 notation range to write to (e.g., \"A1:B2\" or \"Sheet1!A1:B2\")."
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            },
+            "maxItems": 500
+          },
+          "maxItems": 500,
+          "description": "2D array of values to write. Each inner array represents a row."
+        },
+        "valueInputOption": {
+          "type": "string",
+          "enum": [
+            "RAW",
+            "USER_ENTERED"
+          ],
+          "default": "USER_ENTERED",
+          "description": "How input data should be interpreted. RAW: values are stored as-is. USER_ENTERED: values are parsed as if typed by a user."
+        }
+      },
+      "required": [
+        "spreadsheetId",
+        "range",
+        "values"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "appendRows",
+    "description": "Appends rows to the end of a sheet. Data is added after the last row with content in the specified range.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "spreadsheetId": {
+          "type": "string",
+          "description": "The spreadsheet ID — the long string between /d/ and /edit in a Google Sheets URL."
+        },
+        "range": {
+          "type": "string",
+          "description": "A1 notation range indicating where to append (e.g., \"A1\" or \"Sheet1!A1\"). Data will be appended starting from this range."
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "description": "2D array of values to append. Each inner array represents a row."
+        },
+        "valueInputOption": {
+          "type": "string",
+          "enum": [
+            "RAW",
+            "USER_ENTERED"
+          ],
+          "default": "USER_ENTERED",
+          "description": "How input data should be interpreted. RAW: values are stored as-is. USER_ENTERED: values are parsed as if typed by a user."
+        }
+      },
+      "required": [
+        "spreadsheetId",
+        "range",
+        "values"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "createSpreadsheet",
+    "description": "Creates a new spreadsheet. Optionally places it in a specific folder and populates it with initial data.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Title for the new spreadsheet."
+        },
+        "parentFolderId": {
+          "type": "string",
+          "description": "ID of folder where spreadsheet should be created. If not provided, creates in Drive root."
+        },
+        "initialData": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "description": "Optional initial data to populate in the first sheet. Each inner array represents a row."
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "listSpreadsheets",
+    "description": "Lists spreadsheets in your Drive, optionally filtered by name or content.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "maxResults": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 20,
+          "description": "Maximum number of spreadsheets to return (1-100)."
+        },
+        "query": {
+          "type": "string",
+          "description": "Search query to filter spreadsheets by name or content."
+        },
+        "orderBy": {
+          "type": "string",
+          "enum": [
+            "name",
+            "modifiedTime",
+            "createdTime"
+          ],
+          "default": "modifiedTime",
+          "description": "Sort order for results."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "appendMarkdown",
+    "description": "Appends formatted content to the end of a document using markdown syntax. Supports headings, bold, italic, strikethrough, links, and bullet/numbered lists. Use this instead of appendText when you need formatting.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "documentId": {
+          "type": "string",
+          "description": "The document ID — the long string between /d/ and /edit in a Google Docs URL."
+        },
+        "markdown": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The markdown content to append."
+        },
+        "addNewlineIfNeeded": {
+          "type": "boolean",
+          "default": true,
+          "description": "Add spacing before appended content if needed."
+        },
+        "tabId": {
+          "type": "string",
+          "description": "The ID of the specific tab to append to. If not specified, appends to the first tab."
+        },
+        "firstHeadingAsTitle": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, the first H1 heading (# ...) in the markdown is styled as a Google Docs TITLE instead of Heading 1. Useful when the markdown represents a full document whose first line is the document title."
+        }
+      },
+      "required": [
+        "documentId",
+        "markdown"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "listEvents",
+    "description": "Lists or searches Google Calendar events. Defaults to the user's primary calendar starting now. Use timeMin/timeMax (RFC3339 timestamps) to bound the window, q for free-text search, and maxResults to cap the count. Returns event IDs needed for updateEvent and deleteEvent.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "calendarId": {
+          "type": "string",
+          "default": "primary",
+          "description": "Calendar ID. Defaults to \"primary\" (the user's main calendar)."
+        },
+        "q": {
+          "type": "string",
+          "description": "Free-text search across summary, description, location, and attendees."
+        },
+        "timeMin": {
+          "type": "string",
+          "description": "Lower bound (inclusive) as RFC3339 timestamp, e.g. \"2026-04-10T00:00:00-08:00\". Defaults to now."
+        },
+        "timeMax": {
+          "type": "string",
+          "description": "Upper bound (exclusive) as RFC3339 timestamp."
+        },
+        "maxResults": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2500,
+          "default": 25,
+          "description": "Maximum number of events to return (1-2500). Defaults to 25."
+        },
+        "singleEvents": {
+          "type": "boolean",
+          "default": true,
+          "description": "If true (default), expands recurring events into individual instances. Set false to receive recurring events as a single record."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "createEvent",
+    "description": "Creates a new event on a Google Calendar. Supports timed events (start/end with dateTime) and all-day events (start/end with date). Set sendUpdates to email invitations to attendees.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "calendarId": {
+          "type": "string",
+          "default": "primary",
+          "description": "Calendar ID. Defaults to \"primary\"."
+        },
+        "summary": {
+          "type": "string",
+          "description": "Event title."
+        },
+        "description": {
+          "type": "string",
+          "description": "Event description / notes."
+        },
+        "location": {
+          "type": "string",
+          "description": "Physical address or location string."
+        },
+        "start": {
+          "type": "object",
+          "properties": {
+            "dateTime": {
+              "type": "string",
+              "description": "RFC3339 timestamp with timezone offset, e.g. \"2026-04-15T14:00:00-08:00\". Use this for timed events."
+            },
+            "date": {
+              "type": "string",
+              "description": "ISO date \"YYYY-MM-DD\" for all-day events. Use instead of dateTime."
+            },
+            "timeZone": {
+              "type": "string",
+              "description": "IANA timezone like \"America/Los_Angeles\". Optional when dateTime has an offset."
+            }
+          },
+          "additionalProperties": false,
+          "description": "Event start. Provide dateTime or date."
+        },
+        "end": {
+          "$ref": "#/properties/start",
+          "description": "Event end. Provide dateTime or date. For all-day events, end.date is exclusive."
+        },
+        "attendees": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "email": {
+                "type": "string",
+                "description": "Attendee email address."
+              },
+              "optional": {
+                "type": "boolean",
+                "description": "Mark attendee as optional."
+              }
+            },
+            "required": [
+              "email"
+            ],
+            "additionalProperties": false
+          },
+          "description": "List of attendees to invite."
+        },
+        "sendUpdates": {
+          "type": "string",
+          "enum": [
+            "all",
+            "externalOnly",
+            "none"
+          ],
+          "default": "none",
+          "description": "Whether to send email invitations: \"all\" sends to everyone, \"externalOnly\" only to non-domain attendees, \"none\" sends nothing (default)."
+        },
+        "conferenceData": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, attaches an automatically generated Google Meet link to the event."
+        }
+      },
+      "required": [
+        "summary",
+        "start",
+        "end"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "updateEvent",
+    "description": "Updates an existing Google Calendar event with PATCH semantics — only the fields you provide are changed; everything else stays the same. Common uses: reschedule (set start+end), retitle (set summary), add/remove attendees (set attendees array which fully replaces).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "calendarId": {
+          "type": "string",
+          "default": "primary",
+          "description": "Calendar ID. Defaults to \"primary\"."
+        },
+        "eventId": {
+          "type": "string",
+          "description": "The event ID to update (from listEvents)."
+        },
+        "summary": {
+          "type": "string",
+          "description": "New event title."
+        },
+        "description": {
+          "type": "string",
+          "description": "New event description."
+        },
+        "location": {
+          "type": "string",
+          "description": "New location."
+        },
+        "start": {
+          "type": "object",
+          "properties": {
+            "dateTime": {
+              "type": "string",
+              "description": "RFC3339 timestamp with timezone offset, e.g. \"2026-04-15T14:00:00-08:00\". Use this for timed events."
+            },
+            "date": {
+              "type": "string",
+              "description": "ISO date \"YYYY-MM-DD\" for all-day events. Use instead of dateTime."
+            },
+            "timeZone": {
+              "type": "string",
+              "description": "IANA timezone like \"America/Los_Angeles\". Optional when dateTime has an offset."
+            }
+          },
+          "additionalProperties": false,
+          "description": "New start time."
+        },
+        "end": {
+          "$ref": "#/properties/start",
+          "description": "New end time."
+        },
+        "attendees": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "email": {
+                "type": "string"
+              },
+              "optional": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "email"
+            ],
+            "additionalProperties": false
+          },
+          "description": "Replaces the entire attendee list. To add one, fetch the event first."
+        },
+        "sendUpdates": {
+          "type": "string",
+          "enum": [
+            "all",
+            "externalOnly",
+            "none"
+          ],
+          "default": "none",
+          "description": "Whether to email attendees about the change."
+        }
+      },
+      "required": [
+        "eventId"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "quickAddEvent",
+    "description": "Creates a calendar event from a natural-language string using Google Calendar's quick-add parser. Examples: \"Lunch with Sarah tomorrow at 12pm\", \"Dentist appointment next Tuesday 3-4pm\", \"Team standup every weekday 9am\". Faster than createEvent when you don't need attendees, descriptions, or precise control over fields.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "calendarId": {
+          "type": "string",
+          "default": "primary",
+          "description": "Calendar ID. Defaults to \"primary\"."
+        },
+        "text": {
+          "type": "string",
+          "description": "Natural-language description of the event. Google parses the title and time from this string."
+        },
+        "sendUpdates": {
+          "type": "string",
+          "enum": [
+            "all",
+            "externalOnly",
+            "none"
+          ],
+          "default": "none",
+          "description": "Whether to email invitations (rarely useful for quick add)."
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  }
+]
