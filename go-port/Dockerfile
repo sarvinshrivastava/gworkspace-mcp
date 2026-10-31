@@ -28,9 +28,13 @@ COPY --from=certs /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=build /out/gworkspace-mcp /app/gworkspace-mcp
 # The token store (a tmpfs at runtime) and the policy database (a named
 # volume). A fresh named volume copies ownership from these directories.
-COPY --from=build --chown=65534:65534 /state /state
-COPY --from=build --chown=65534:65534 /data/config /data/config
-USER 65534:65534
+# 1000, not 65534: the TS image ran as node (1000), so the live volume and the
+# compose restore steps are 1000-owned. Any other uid FATALs on the existing
+# policy DB ("readonly database"), and a rollback to the TS image must still
+# own whatever this one wrote.
+COPY --from=build --chown=1000:1000 /state /state
+COPY --from=build --chown=1000:1000 /data/config /data/config
+USER 1000:1000
 EXPOSE 3014 3015
 # The binary checks its own /healthz: scratch has no shell, curl or node.
 HEALTHCHECK --interval=60s --timeout=10s --start-period=90s --retries=3 \

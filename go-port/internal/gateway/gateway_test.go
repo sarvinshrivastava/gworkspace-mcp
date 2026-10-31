@@ -12,9 +12,23 @@ import (
 	"github.com/sarvinshrivastava/gworkspace-mcp/go-port/internal/policy"
 )
 
+// pinnedNames is the full 20-tool allowlist, the shape prod passes.
+func pinnedNames(t *testing.T) []string {
+	t.Helper()
+	var all []ToolSchema
+	if err := json.Unmarshal(schemasJSON, &all); err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, len(all))
+	for i, s := range all {
+		names[i] = s.Name
+	}
+	return names
+}
+
 func testDeps(t *testing.T, agent *policy.AgentContext) *Deps {
 	t.Helper()
-	schemas, err := LoadSchemas(nil)
+	schemas, err := LoadSchemas(pinnedNames(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,6 +85,34 @@ func TestHealthz_ReadyAndShape(t *testing.T) {
 	w = do(t, d.Handler(), "GET", "/healthz", "", "")
 	if w.Code != 503 {
 		t.Fatalf("not ready: status = %d", w.Code)
+	}
+}
+
+// TS selectTools: an empty allowlist exposes NOTHING. config.envList returns
+// nil for an unset, empty or whitespace-only TOOL_ALLOWLIST, so nil must deny
+// too.
+func TestLoadSchemas_EmptyAllowlistDeniesAll(t *testing.T) {
+	for _, allow := range [][]string{nil, {}} {
+		got, err := LoadSchemas(allow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("LoadSchemas(%#v) exposed %d tools, want 0", allow, len(got))
+		}
+	}
+}
+
+func TestLoadSchemas_FiltersAndIgnoresUnknown(t *testing.T) {
+	got, err := LoadSchemas([]string{"readDocument", "appendTableRows", "sendEmail"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Name != "readDocument" {
+		t.Fatalf("got %v", got)
+	}
+	if all, _ := LoadSchemas(pinnedNames(t)); len(all) != 20 {
+		t.Fatalf("full allowlist exposed %d tools, want 20", len(all))
 	}
 }
 

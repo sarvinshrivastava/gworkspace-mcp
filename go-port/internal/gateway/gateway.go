@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -41,18 +42,35 @@ func LoadSchemas(allowlist []string) ([]ToolSchema, error) {
 	if len(all) != 20 {
 		return nil, fmt.Errorf("pinned tool schemas: expected exactly 20, got %d", len(all))
 	}
-	if allowlist == nil {
-		return all, nil // no env: the full pinned set
+	// Deny-all on an empty allowlist, as in the TS: a service reachable by a
+	// model reading documents other people can write must not expose
+	// everything by default.
+	if len(allowlist) == 0 {
+		fmt.Println("[tools] TOOL_ALLOWLIST is empty — exposing NO tools. Set it to a comma-separated list of tool names.")
+		return []ToolSchema{}, nil
 	}
 	allow := map[string]bool{}
 	for _, name := range allowlist {
 		allow[name] = true
 	}
+	known := map[string]bool{}
 	out := make([]ToolSchema, 0, len(all))
 	for _, t := range all {
+		known[t.Name] = true
 		if allow[t.Name] {
 			out = append(out, t)
 		}
+	}
+	// A typo in the allowlist otherwise removes a tool with no error, no
+	// warning and no health signal.
+	var missing []string
+	for _, name := range allowlist {
+		if !known[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		fmt.Printf("[tools] not found upstream, ignored: %s\n", strings.Join(missing, ", "))
 	}
 	return out, nil
 }
