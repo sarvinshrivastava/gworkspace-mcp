@@ -177,9 +177,9 @@ jobs:
             echo "::error::vault unreachable while checking DASHBOARD_ADMIN_PASSWORD_HASH — not deploying against an unknown state"
             exit 1
           elif [ $rc -ne 0 ] || [ -z "$hash" ]; then
-            echo "::warning::DASHBOARD_ADMIN_PASSWORD_HASH is not in vault folder ${VAULT_FOLDER} — the admin dashboard will refuse every login. Make one with \`npm run build && npm run hash-password\`."
+            echo "::warning::DASHBOARD_ADMIN_PASSWORD_HASH is not in vault folder ${VAULT_FOLDER} — the admin dashboard will refuse every login. Make one with \`cd go-port && go run ./cmd/hash-password\` (it prompts for the password)."
           elif ! [[ "$hash" =~ ^scrypt\$[0-9]+\$[0-9]+\$[0-9]+\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$ ]]; then
-            echo "::error::DASHBOARD_ADMIN_PASSWORD_HASH is not a scrypt\$N\$r\$p\$salt\$key hash (${#hash} characters). Store the exact output of npm run hash-password."
+            echo "::error::DASHBOARD_ADMIN_PASSWORD_HASH is not a scrypt\$N\$r\$p\$salt\$key hash (${#hash} characters). Store the exact output of go-port's cmd/hash-password."
             exit 1
           else
             echo "DASHBOARD_ADMIN_PASSWORD_HASH: present"
@@ -284,30 +284,66 @@ jobs:
             [ "$restarts" -lt 0 ] && restarts=0
             echo "attempt $i: health=$status restarts=$restarts"
             if [ "$status" = "healthy" ]; then
+              # Read /healthz from the host, not by exec: the Go image has no
+              # node or shell, and both images publish it on 127.0.0.1:3014.
+              # Both emit compact JSON (Express res.json, Go json.Marshal) and
+              # db, tools and probe are unique keys, so fixed strings match.
+              healthz() { curl -sS --max-time 5 http://127.0.0.1:3014/healthz 2>/dev/null || true; }
+              body=""
+              for _ in $(seq 1 6); do
+                body=$(healthz)
+                [ -n "$body" ] && break
+                sleep 5
+              done
+              if [ -z "$body" ]; then
+                echo "::error::gworkspace-mcp reports healthy but 127.0.0.1:3014/healthz did not answer for 30s — is the port published?"
+                exit 1
+              fi
               # Healthy is not enough: without its volume the service boots in a
               # degraded mode that still answers 200 but refuses every minted
               # token. That is a failed deploy, not a green one.
-              if docker exec gworkspace-mcp node -e "fetch('http://localhost:3014/healthz').then(r=>r.json()).then(j=>process.exit(j.db?0:1)).catch(()=>process.exit(1))"; then
-                # Healthy says nothing about Google: the boot probe runs just
-                # after. An expired or revoked refresh token boots fine and fails
-                # every call, so surface the probe's verdict on the run.
-                for _ in $(seq 1 12); do
-                  verdict=$(docker logs gworkspace-mcp 2>&1 | grep -E "credential verified|CREDENTIAL CHECK" | tail -1)
-                  [ -n "$verdict" ] && break
-                  sleep 5
-                done
-                case "$verdict" in
-                  *"credential verified"*) echo "Google credential verified" ;;
-                  "") echo "::warning::the Google credential check did not report within 60s — check docker logs" ;;
-                  *"CREDENTIAL CHECK skipped"*) echo "::warning::the Google credential check was skipped (the Workspace server was not connected) — check docker logs" ;;
-                  *"CREDENTIAL CHECK could not run"*) echo "::warning::the Google credential check could not run — check docker logs" ;;
-                  *) echo "::warning::${verdict#*] } — the service is up but every Workspace call will fail until GOOGLE_TOKEN_JSON is fixed" ;;
-                esac
-                exit 0
+              case "$body" in
+                *'"db":true'*) ;;
+                *)
+                  echo "::error::gworkspace-mcp is up but its policy database is not (healthz db=false) — is the gworkspace-state volume mounted?"
+                  docker logs --tail 50 gworkspace-mcp 2>&1 | grep -E "\[db\]|FATAL" || true
+                  exit 1 ;;
+              esac
+              # An empty volume looks healthy too: the service creates a fresh
+              # database and seeds the default agent, and every other agent,
+              # token and grant is gone. --force-recreate makes this container's
+              # log start at this deploy, restarts included.
+              if docker logs gworkspace-mcp 2>&1 | grep -q "\[db\] created the default agent"; then
+                echo "::error::this boot created a fresh policy database: every agent, token and grant from before is gone. Expected only on a brand-new volume; otherwise check the gworkspace-state volume."
+                exit 1
               fi
-              echo "::error::gworkspace-mcp is up but its policy database is not (healthz db=false) — is the gworkspace-state volume mounted?"
-              docker logs --tail 50 gworkspace-mcp 2>&1 | grep -E "\[db\]|FATAL" || true
-              exit 1
+              # Zero tools: TOOL_ALLOWLIST overridden on the VPS with names this
+              # image does not serve. ("upstreamTools" never matches: capital T.)
+              case "$body" in
+                *'"tools":0'*)
+                  echo "::error::gworkspace-mcp exposes 0 tools — is TOOL_ALLOWLIST overridden in /opt/gworkspace-mcp/.env?"
+                  docker logs gworkspace-mcp 2>&1 | grep -E "^\[tools\]" | tail -3 || true
+                  exit 1 ;;
+              esac
+              # Healthy says nothing about Google. An expired or revoked refresh
+              # token boots fine and fails every call, so surface the boot
+              # probe's verdict. The TS image answers 200 before its probe has
+              # run ("probe":"unknown"), so poll.
+              probe=""
+              for _ in $(seq 1 12); do
+                case "$body" in
+                  *'"probe":"ok"'*) probe=ok; break ;;
+                  *'"probe":"failed"'*) probe=failed; break ;;
+                esac
+                sleep 5
+                body=$(healthz)
+              done
+              case "$probe" in
+                ok) echo "Google credential verified" ;;
+                failed) echo "::warning::the boot check of the Google credential failed ($(printf '%s' "$body" | grep -o '"state":"[a-z_]*"' | head -1)) — the service is up but every Workspace call will fail until GOOGLE_TOKEN_JSON is fixed" ;;
+                *) echo "::warning::the Google credential check did not report within 60s — check docker logs" ;;
+              esac
+              exit 0
             fi
             if [ "$status" = "missing" ]; then docker logs --tail 50 gworkspace-mcp 2>&1 || true; exit 1; fi
             if [ "$restarts" -gt 2 ]; then echo "crash-looping"; docker logs --tail 100 gworkspace-mcp 2>&1 || true; exit 1; fi
@@ -327,4 +363,8 @@ jobs:
             echo "Wire it in Open WebUI: Admin → Settings → Integrations → MCP → \`http://gworkspace-mcp:3014/mcp\`, auth Bearer."
             echo ""
             echo "Admin dashboard: \`ssh -N -L 3015:127.0.0.1:3017 root@<vps>\`, then open http://localhost:3015"
+            if [ "${{ job.status }}" != "success" ]; then
+              echo ""
+              echo "Roll back to the last TS relay: run this workflow again with image_tag \`sha-e8d3d40\` (same compose file, same volume)."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"

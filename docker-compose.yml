@@ -1,7 +1,9 @@
 # gworkspace-mcp - Google Docs, Sheets, Drive and Calendar in chat.
 #
-# The upstream server speaks stdio; Open WebUI speaks Streamable HTTP only. This
-# runs the former as a child and relays between them.
+# The image is the Go service built from go-port/ (one static binary, the tool
+# handlers in-process). This file also boots the previous TS relay image
+# (sha-e8d3d40), so a rollback is only a different image tag: keep it
+# image-agnostic until the TS is removed.
 #
 #   SECRETS_MANAGER_TOKEN=<token> docker compose up -d
 
@@ -42,12 +44,13 @@ services:
       # job gworkspace-mcp/housekeeping calls POST /internal/housekeeping with
       # the vault's GWORKSPACE_PLR_TOKEN). Anything else refuses to boot.
       HOUSEKEEPING_SCHEDULER: '${HOUSEKEEPING_SCHEDULER:-external}'
+      # TS image only (rollback); the Go service ignores these four.
+      # CHILD_HEAP_MB is the TS upstream child's own budget, set explicitly
+      # rather than inherited — two 192 MB heaps in one cgroup is how the
+      # OOM-killer takes the child and leaves a healthy-looking container whose
+      # every tool call fails.
       CONFIG_HOME: '/data/config'
       TOKEN_DIR: '/data/config/google-docs-mcp'
-      # This process only. The child gets its own budget (CHILD_HEAP_MB), set
-      # explicitly rather than inherited — two 192 MB heaps in one cgroup is how
-      # the OOM-killer takes the child and leaves a healthy-looking container
-      # whose every tool call fails.
       NODE_OPTIONS: '--max-old-space-size=128'
       CHILD_HEAP_MB: '192'
 
@@ -64,10 +67,11 @@ services:
       # sendEmail, deleteFile and setFilePermission on a full-Drive grant.
       TOOL_ALLOWLIST: '${TOOL_ALLOWLIST:-readDocument,appendText,insertText,findAndReplace,createDocument,listDocuments,searchDocuments,appendMarkdown,readSpreadsheet,writeSpreadsheet,appendRows,createSpreadsheet,listSpreadsheets,searchDriveFiles,listDriveFiles,createFolder,listEvents,createEvent,updateEvent,quickAddEvent}'
 
-    # A tmpfs, not a volume. The refresh token is rewritten from the vault on
-    # every boot and the upstream never persists one in stdio mode, so a volume
-    # only kept a second permanent plaintext copy of a full-Drive +
-    # gmail.modify credential on host disk, surviving `docker compose down`.
+    # TS image only (rollback): its upstream child reads the refresh token from
+    # a file here. The Go service keeps the token in memory and writes nothing
+    # to /data. A tmpfs, not a volume: a volume only kept a second permanent
+    # plaintext copy of a full-Drive + gmail.modify credential on host disk,
+    # surviving `docker compose down`.
     tmpfs:
       - /data:uid=1000,gid=1000,mode=0700,size=8m
       - /tmp:size=16m
@@ -95,15 +99,17 @@ services:
       - shared # open-webui reaches /mcp by name
       - vault # secret-manager, for credentials at boot
 
-    # Two Node processes live in here, and an upstream result has to exist at
-    # once in the child's heap, the parent's read buffer and the response.
+    # Sized for the TS image (rollback): two Node processes, and an upstream
+    # result held at once in the child's heap, the parent's read buffer and
+    # the response. The Go service idles at ~15 MiB; tighten once the TS is gone.
     mem_limit: 512m
     memswap_limit: 640m # NOT equal to mem_limit: that disables swap entirely
     cpus: 0.25
     pids_limit: 256
 
-    # Node as PID 1 installs no SIGTERM handler, so without an init every deploy
-    # waits out the full 10s stop timeout and the child never shuts down cleanly.
+    # An init forwards SIGTERM and reaps children: Node as PID 1 installs no
+    # SIGTERM handler, and the Go binary closes the policy DB (checkpointing
+    # the WAL) on the signal it forwards.
     init: true
 
     labels:
@@ -115,20 +121,11 @@ services:
     # Nothing writes outside /data and /tmp (tmpfs) and /state (the volume).
     read_only: true
 
-    healthcheck:
-      test:
-        - CMD
-        - node
-        - -e
-        - "fetch('http://localhost:3014/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      # Boot is four concurrent vault fetches plus the child registering ~120
-      # tools — measured 10-25s on a contended single core, no Google I/O at all
-      # (the upstream defers every network call to the first tool invocation).
-      # 90s is deliberate headroom for contention, not a tight fit.
-      start_period: 90s
+    # No `healthcheck:` here on purpose: each image carries its own HEALTHCHECK
+    # with identical timings (60s interval, 10s timeout, 90s start period, 3
+    # retries, both on :3014/healthz) — the Go binary checks itself with
+    # `-healthcheck` (scratch has no shell, curl or node), the TS image uses
+    # node. An override here would pin one image's command and break the other.
 
     logging:
       driver: json-file
