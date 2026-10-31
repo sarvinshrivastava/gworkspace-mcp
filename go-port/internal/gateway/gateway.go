@@ -129,8 +129,10 @@ func (d *Deps) Handler() http.Handler {
 	}, &mcp.StreamableHTTPOptions{Stateless: true})
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", d.healthz)
-	mux.HandleFunc("POST /internal/housekeeping", d.withInternalGuard(d.internalHousekeeping))
-	mux.HandleFunc("POST /internal/", d.withInternalGuard(d.internalNotFound))
+	// One guard for every method under /internal/, as the TS mounted its
+	// guard: a non-POST must meet the guard (not a mux 405), and every path
+	// must share one rate-limit bucket.
+	mux.HandleFunc("/internal/", d.withInternalGuard(d.internalRoutes))
 	mux.HandleFunc("POST /mcp", d.mcpPost)
 	mux.HandleFunc("/mcp", d.mcpMethodNotAllowed)
 	return mux
@@ -190,9 +192,13 @@ func (d *Deps) internalHousekeeping(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, string(raw))
 }
 
-// Ends the mount: an authenticated request for anything else under /internal
-// stops here rather than reaching whatever is registered later.
-func (d *Deps) internalNotFound(w http.ResponseWriter, _ *http.Request) {
+// internalRoutes runs behind the guard. Only POST /internal/housekeeping
+// exists; any other method or path under /internal ends here as a 404.
+func (d *Deps) internalRoutes(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost && r.URL.Path == "/internal/housekeeping" {
+		d.internalHousekeeping(w, r)
+		return
+	}
 	w.WriteHeader(404)
 }
 

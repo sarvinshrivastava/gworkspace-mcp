@@ -17,6 +17,7 @@ import (
 	"github.com/sarvinshrivastava/gworkspace-mcp/go-port/internal/drive"
 	"github.com/sarvinshrivastava/gworkspace-mcp/go-port/internal/enforce"
 	"github.com/sarvinshrivastava/gworkspace-mcp/go-port/internal/policy"
+	"github.com/sarvinshrivastava/gworkspace-mcp/go-port/internal/remote"
 	"github.com/sarvinshrivastava/gworkspace-mcp/go-port/internal/tools"
 )
 
@@ -59,7 +60,9 @@ func (d *Deps) mcpPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if agent == nil {
-		source := r.RemoteAddr
+		// Host only: the audit dedupe keys on it, and with the port every new
+		// connection carrying a bad bearer would write its own row.
+		source := remote.Host(r.RemoteAddr)
 		fmt.Printf("[auth] rejected request from %s\n", orUnknown(source))
 		if a := d.Audit(); a != nil {
 			a.AuthFailure(source, "")

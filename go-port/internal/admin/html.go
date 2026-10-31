@@ -52,13 +52,15 @@ func render(value any) string {
 	}
 }
 
-// h composes HTML like the TS html“ tag: literal parts interleaved with
-// rendered values. h("<a>", x, "</a>").
+// h composes HTML like the TS html“ tag: template text at even positions,
+// values at odd positions, h("<a>", x, "</a>"). Every value is escaped unless
+// it is Safe — a string value too, so a dynamic message can never pass as
+// markup by being a string.
 func h(parts ...any) Safe {
 	var b strings.Builder
-	for _, p := range parts {
-		if s, ok := p.(string); ok {
-			b.WriteString(s) // literal template text is trusted source
+	for i, p := range parts {
+		if i%2 == 0 {
+			b.WriteString(p.(string)) // template text is trusted source
 		} else {
 			b.WriteString(render(p))
 		}

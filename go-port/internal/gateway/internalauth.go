@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sarvinshrivastava/gworkspace-mcp/go-port/internal/remote"
 )
 
 const (
@@ -85,10 +87,7 @@ func (g *internalGuard) ServeHTTP(w http.ResponseWriter, r *http.Request, next h
 		return
 	}
 
-	source := r.RemoteAddr
-	if i := strings.LastIndex(source, ":"); i > 0 {
-		source = source[:i] // drop the port, as req.socket.remoteAddress has none... keep host only
-	}
+	source := remote.Host(r.RemoteAddr)
 	at := g.now()
 	g.mu.Lock()
 	g.sweep(at)

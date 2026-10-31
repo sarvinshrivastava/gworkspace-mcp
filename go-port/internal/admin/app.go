@@ -14,6 +14,7 @@ import (
 	"github.com/sarvinshrivastava/gworkspace-mcp/go-port/internal/drive"
 	"github.com/sarvinshrivastava/gworkspace-mcp/go-port/internal/enforce"
 	"github.com/sarvinshrivastava/gworkspace-mcp/go-port/internal/policy"
+	"github.com/sarvinshrivastava/gworkspace-mcp/go-port/internal/remote"
 )
 
 const Cookie = "gws_admin_sid"
@@ -129,10 +130,7 @@ func (d *Deps) Handler() http.Handler {
 			}
 		}()
 		// 1. Who may connect at all. The socket, never a header.
-		source := r.RemoteAddr
-		if i := strings.LastIndex(source, ":"); i > 0 && !strings.HasSuffix(source, "]") {
-			source = source[:i]
-		}
+		source := remote.Host(r.RemoteAddr)
 		if !IsAllowed(source, d.Allowed()) {
 			w.Header().Set("Content-Type", "text/plain")
 			w.WriteHeader(403)
@@ -164,11 +162,7 @@ func (a *adminApp) page(w http.ResponseWriter, status int, body string) {
 }
 
 func (a *adminApp) source(r *http.Request) string {
-	source := r.RemoteAddr
-	if i := strings.LastIndex(source, ":"); i > 0 && !strings.HasSuffix(source, "]") {
-		source = source[:i]
-	}
-	return source
+	return remote.Host(r.RemoteAddr)
 }
 
 func (a *adminApp) dbUnavailable(w http.ResponseWriter) {

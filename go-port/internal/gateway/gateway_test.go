@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sarvinshrivastava/gworkspace-mcp/go-port/internal/audit"
 	"github.com/sarvinshrivastava/gworkspace-mcp/go-port/internal/drive"
+	"github.com/sarvinshrivastava/gworkspace-mcp/go-port/internal/housekeeping"
 	"github.com/sarvinshrivastava/gworkspace-mcp/go-port/internal/policy"
 )
 
@@ -133,6 +135,37 @@ func TestMcp_Auth(t *testing.T) {
 	}
 }
 
+// Bad bearers over two connections from one client are one audit row: the
+// per-minute dedupe keys on the host, as the TS did, not on host:port.
+func TestMcp_AuthFailureAuditKeysOnHost(t *testing.T) {
+	store, err := policy.OpenPolicyStore(filepath.Join(t.TempDir(), "p.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	aud := audit.New(store)
+	d := testDeps(t, nil)
+	d.Audit = func() *audit.Audit { return aud }
+	h := d.Handler()
+	for _, addr := range []string{"172.18.0.5:40001", "172.18.0.5:40002"} {
+		r := httptest.NewRequest("POST", "/mcp", strings.NewReader(`{}`))
+		r.RemoteAddr = addr
+		r.Header.Set("Authorization", "Bearer wrong")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != 401 {
+			t.Fatalf("%s: status %d", addr, w.Code)
+		}
+	}
+	rows, err := store.QueryAudit(policy.AuditFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Source != "172.18.0.5" {
+		t.Fatalf("want one row with source 172.18.0.5, got %+v", rows)
+	}
+}
+
 func TestMcp_BatchRefused(t *testing.T) {
 	d := testDeps(t, &policy.AgentContext{Slug: "a"})
 	w := do(t, d.Handler(), "POST", "/mcp", "good", `[]`)
@@ -236,6 +269,45 @@ func TestInternal_WrongBearer401(t *testing.T) {
 	w := do(t, d.Handler(), "POST", "/internal/housekeeping", "wrong", "")
 	if w.Code != 401 {
 		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+}
+
+// TS order for every method and path under /internal: guard first (401 with
+// no or a bad bearer), then the router (404 for anything but POST
+// /internal/housekeeping). One rate-limit bucket across all of it.
+func TestInternal_GuardCoversEveryMethodAndPath(t *testing.T) {
+	good := strings.Repeat("x", 40)
+	d := testDeps(t, nil)
+	d.PlrToken = func() string { return good }
+	d.Housekeeping = func() *housekeeping.Runner { return nil } // degraded: no store
+	h := d.Handler()
+	cases := []struct {
+		method, path, bearer string
+		want                 int
+	}{
+		{"GET", "/internal/housekeeping", "", 401},
+		{"GET", "/internal/housekeeping", good, 404},
+		{"POST", "/internal/nope", good, 404},
+		{"POST", "/internal/housekeeping/", good, 404},
+		{"POST", "/internal/housekeeping", good, 503}, // no store in testDeps
+	}
+	for _, c := range cases {
+		if w := do(t, h, c.method, c.path, c.bearer, ""); w.Code != c.want {
+			t.Errorf("%s %s bearer=%t: %d, want %d", c.method, c.path, c.bearer != "", w.Code, c.want)
+		}
+	}
+}
+
+func TestInternal_OneRateLimitBucketAcrossPaths(t *testing.T) {
+	d := testDeps(t, nil)
+	d.PlrToken = func() string { return strings.Repeat("x", 40) }
+	h := d.Handler()
+	for i := 0; i < 5; i++ {
+		do(t, h, "POST", "/internal/housekeeping", "wrong", "")
+		do(t, h, "GET", "/internal/nope", "wrong", "")
+	}
+	if w := do(t, h, "POST", "/internal/housekeeping", "wrong", ""); w.Code != 429 {
+		t.Fatalf("11th request across two paths: %d, want 429", w.Code)
 	}
 }
 
