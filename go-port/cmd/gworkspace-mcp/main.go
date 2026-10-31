@@ -84,17 +84,13 @@ func run() error {
 	}
 
 	// --- state shared by both listeners --------------------------------------
-	var (
-		legacyToken  string
-		passwordHash *string // nil until the vault has answered
-		plrToken     string
-		driveClient  *drive.Client
-		ready        bool
-	)
+	// Written once, after both listeners already serve: published through
+	// one atomic pointer so no handler reads a half-written value.
+	var boot bootCell
 	googleHealth := drive.NewHealth()
 
-	resolver := enforce.NewScopeResolver(func() *drive.Client { return driveClient })
-	subtree := enforce.NewSubtreeCache(func() *drive.Client { return driveClient })
+	resolver := enforce.NewScopeResolver(boot.Drive)
+	subtree := enforce.NewSubtreeCache(boot.Drive)
 
 	schemas, err := gateway.LoadSchemas(cfg.ToolAllowlist)
 	if err != nil {
@@ -103,9 +99,9 @@ func run() error {
 
 	authenticator := func() func(string) (*policy.AgentContext, error) {
 		if store != nil {
-			return policy.MakeAuthenticator(store, func() string { return legacyToken })
+			return policy.MakeAuthenticator(store, boot.LegacyToken)
 		}
-		degraded := policy.MakeDegradedAuthenticator(func() string { return legacyToken })
+		degraded := policy.MakeDegradedAuthenticator(boot.LegacyToken)
 		return func(bearer string) (*policy.AgentContext, error) { return degraded(bearer), nil }
 	}
 
@@ -137,11 +133,11 @@ func run() error {
 		Pipeline: enforce.PipelineDeps{
 			Resolver: resolver,
 			Subtree:  subtree,
-			Drive:    func() *drive.Client { return driveClient },
+			Drive:    boot.Drive,
 		},
 		Registry:    registry,
 		GoogleTools: googleTools,
-		Ready:       func() bool { return ready },
+		Ready:       boot.Ready,
 		DBUp:        func() bool { return store != nil },
 		AuditErrors: func() int64 {
 			if aud != nil {
@@ -150,7 +146,7 @@ func run() error {
 			return 0
 		},
 		Housekeeping: func() *housekeeping.Runner { return hk },
-		PlrToken:     func() string { return plrToken },
+		PlrToken:     boot.PlrToken,
 		Google:       googleHealth,
 		Schemas:      schemas,
 	}
@@ -159,10 +155,10 @@ func run() error {
 		Store:        func() *policy.PolicyStore { return store },
 		DBError:      func() string { return dbError },
 		Audit:        func() *audit.Audit { return aud },
-		Drive:        func() *drive.Client { return driveClient },
+		Drive:        boot.Drive,
 		Resolver:     resolver,
 		Subtree:      subtree,
-		PasswordHash: func() *string { return passwordHash },
+		PasswordHash: boot.PasswordHash,
 		ExposedOrder: func() []string {
 			out := make([]string, len(schemas))
 			for i, t := range schemas {
@@ -175,10 +171,15 @@ func run() error {
 	}
 
 	// --- 2. listen ------------------------------------------------------------
-	mcpSrv := &http.Server{Addr: fmt.Sprintf(":%d", cfg.Port), Handler: mcpDeps.Handler()}
+	// Header and idle timeouts, as Node applied by default (headersTimeout):
+	// :3014 is reachable from every container on `shared`. No WriteTimeout,
+	// which would cut long tool calls; bodies are capped at 4 MB after auth.
+	mcpSrv := &http.Server{Addr: fmt.Sprintf(":%d", cfg.Port), Handler: mcpDeps.Handler(),
+		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	// 0.0.0.0 so the 127.0.0.1-only host publish can reach it; the app's
 	// source allowlist is what keeps other containers out.
-	adminSrv := &http.Server{Addr: fmt.Sprintf(":%d", cfg.AdminPort), Handler: adminDeps.Handler()}
+	adminSrv := &http.Server{Addr: fmt.Sprintf(":%d", cfg.AdminPort), Handler: adminDeps.Handler(),
+		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	errCh := make(chan error, 2)
 	go func() {
 		fmt.Printf("gworkspace-mcp listening on :%d\n", cfg.Port)
@@ -231,15 +232,12 @@ func run() error {
 		}
 		vault[r.key] = r.value
 	}
-	legacyToken = vault["GWORKSPACE_MCP_TOKEN"]
-	if h, ok := vault["DASHBOARD_ADMIN_PASSWORD_HASH"]; ok {
-		passwordHash = &h
-	} else {
-		empty := ""
-		passwordHash = &empty
+	// An optional key the vault lacks comes back as "", never absent.
+	passwordHash := vault["DASHBOARD_ADMIN_PASSWORD_HASH"]
+	if passwordHash == "" {
 		fmt.Println("[admin] no DASHBOARD_ADMIN_PASSWORD_HASH in the vault — dashboard login is disabled")
 	}
-	plrToken = gateway.UsablePlrToken(vault["GWORKSPACE_PLR_TOKEN"])
+	plrToken := gateway.UsablePlrToken(vault["GWORKSPACE_PLR_TOKEN"])
 	if vault["GWORKSPACE_PLR_TOKEN"] != "" && plrToken == "" {
 		fmt.Println("[internal] GWORKSPACE_PLR_TOKEN is shorter than 32 characters after trimming whitespace — ignored; /internal/* answers 503 until it is replaced")
 	}
@@ -262,11 +260,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	driveClient = drive.NewClient(drive.Creds{
+	driveClient := drive.NewClient(drive.Creds{
 		ClientID:     vault["GOOGLE_CLIENT_ID"],
 		ClientSecret: vault["GOOGLE_CLIENT_SECRET"],
 		RefreshToken: refreshTokenOf(normalised),
 	}, 30*time.Second, googleHealth.Ok)
+	// A plain write, safe because it precedes boot.Publish: tool calls are
+	// only reached after Ready() loads the published pointer.
 	googleTools.Tok = driveClient
 
 	// Boot probe: a revoked or expired grant boots perfectly and then fails
@@ -277,7 +277,12 @@ func run() error {
 	cancel()
 	googleHealth.Probe(probeResultOf(probeErr))
 
-	ready = true
+	boot.Publish(&bootState{
+		legacyToken:  vault["GWORKSPACE_MCP_TOKEN"],
+		passwordHash: &passwordHash,
+		plrToken:     plrToken,
+		driveClient:  driveClient,
+	})
 	names := make([]string, len(schemas))
 	for i, t := range schemas {
 		names[i] = t.Name
