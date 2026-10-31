@@ -1,0 +1,306 @@
+[
+ {
+  "name": "empty",
+  "markdown": ""
+ },
+ {
+  "name": "whitespace-only",
+  "markdown": "   \n  \n"
+ },
+ {
+  "name": "plain-paragraph",
+  "markdown": "Hello world."
+ },
+ {
+  "name": "two-paragraphs",
+  "markdown": "First para.\n\nSecond para."
+ },
+ {
+  "name": "headings",
+  "markdown": "# H1\n\n## H2\n\n### H3\n\n#### H4\n\n##### H5\n\n###### H6"
+ },
+ {
+  "name": "setext-headings",
+  "markdown": "Title One\n=========\n\nTitle Two\n---------"
+ },
+ {
+  "name": "inline-formatting",
+  "markdown": "This is **bold** and *italic* and ***both*** plus ~~struck~~ and `code`."
+ },
+ {
+  "name": "underscore-emphasis",
+  "markdown": "__bold__ and _italic_ mid_word_underscore stays"
+ },
+ {
+  "name": "links",
+  "markdown": "See [the docs](https://example.com/docs) and <https://auto.link/x>."
+ },
+ {
+  "name": "linkify-url",
+  "markdown": "Visit http://plain.example/a?b=c and www.example.org today."
+ },
+ {
+  "name": "linkify-bare-domain",
+  "markdown": "Type example.com directly."
+ },
+ {
+  "name": "linkify-email",
+  "markdown": "Mail me at user@example.com please."
+ },
+ {
+  "name": "bullet-list",
+  "markdown": "- one\n- two\n- three"
+ },
+ {
+  "name": "ordered-list",
+  "markdown": "1. first\n2. second\n3. third"
+ },
+ {
+  "name": "nested-lists",
+  "markdown": "- a\n  - a1\n  - a2\n- b\n  1. b1\n  2. b2"
+ },
+ {
+  "name": "task-items",
+  "markdown": "- [ ] todo item\n- [x] done item\n- [X] done item caps"
+ },
+ {
+  "name": "list-with-formatting",
+  "markdown": "- **bold item**\n- item with `code`\n- [link item](https://l.example)"
+ },
+ {
+  "name": "loose-list",
+  "markdown": "- one\n\n- two\n\n- three"
+ },
+ {
+  "name": "simple-table",
+  "markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |"
+ },
+ {
+  "name": "formatted-table",
+  "markdown": "| Name | Value |\n| --- | --- |\n| **bold** | `code` |\n| [link](https://t.example) | plain |"
+ },
+ {
+  "name": "fenced-code",
+  "markdown": "```\nconst x = 1;\nconsole.log(x);\n```"
+ },
+ {
+  "name": "fenced-code-lang",
+  "markdown": "```js\nlet a = 'b';\n```"
+ },
+ {
+  "name": "indented-code",
+  "markdown": "Some intro.\n\n    indented code line\n    second line"
+ },
+ {
+  "name": "horizontal-rule",
+  "markdown": "Above.\n\n---\n\nBelow."
+ },
+ {
+  "name": "hr-stars",
+  "markdown": "Text.\n\n***"
+ },
+ {
+  "name": "blockquote",
+  "markdown": "> quoted line one\n> quoted line two"
+ },
+ {
+  "name": "softbreak",
+  "markdown": "line one\nline two"
+ },
+ {
+  "name": "hardbreak",
+  "markdown": "line one  \nline two"
+ },
+ {
+  "name": "entities",
+  "markdown": "Fish &amp; Chips &lt;tag&gt; &quot;quoted&quot;"
+ },
+ {
+  "name": "inline-html",
+  "markdown": "Text with <b>html</b> inside."
+ },
+ {
+  "name": "html-block",
+  "markdown": "<div>\nblock html\n</div>\n\nafter"
+ },
+ {
+  "name": "unicode-emoji",
+  "markdown": "# Emoji \ud83d\ude00 heading\n\nText with \ud83d\ude00 emoji and \u00e0cc\u00e9nts."
+ },
+ {
+  "name": "mixed-doc",
+  "markdown": "# Report\n\nIntro paragraph with **bold**.\n\n- item a\n- item b\n\n| H1 | H2 |\n|---|---|\n| x | y |\n\n```\ncode\n```\n\n---\n\nFinal."
+ },
+ {
+  "name": "first-heading-as-title",
+  "markdown": "# Doc Title\n\nBody text.",
+  "firstHeadingAsTitle": true
+ },
+ {
+  "name": "first-heading-not-h1",
+  "markdown": "## Sub Only\n\nBody.",
+  "firstHeadingAsTitle": true
+ },
+ {
+  "name": "start-index-5",
+  "markdown": "# At Five\n\nText.",
+  "startIndex": 5
+ },
+ {
+  "name": "tab-id",
+  "markdown": "# Tabbed\n\n- item",
+  "tabId": "t.abc123"
+ },
+ {
+  "name": "link-title",
+  "markdown": "[text](https://x.example \"A Title\")"
+ },
+ {
+  "name": "image-syntax",
+  "markdown": "![alt text](https://img.example/p.png)"
+ },
+ {
+  "name": "code-multiline-inline",
+  "markdown": "Use ``code with `tick`` here."
+ },
+ {
+  "name": "list-after-paragraph",
+  "markdown": "Intro line\n- tight item one\n- tight item two"
+ },
+ {
+  "name": "multi-line-list-item",
+  "markdown": "- first line\n  continuation\n- second"
+ },
+ {
+  "name": "linkify-bare-path",
+  "markdown": "See example.com/path?x=1#frag now."
+ },
+ {
+  "name": "linkify-bare-port",
+  "markdown": "Hit example.com:8080/x and example.com:99999 nope."
+ },
+ {
+  "name": "linkify-bare-uppercase",
+  "markdown": "Visit EXAMPLE.COM and Example.Org today."
+ },
+ {
+  "name": "linkify-bare-2ch",
+  "markdown": "check example.co, example.de and example.zz out"
+ },
+ {
+  "name": "linkify-non-tld",
+  "markdown": "version 1.2.3 then example.comm and example.c end"
+ },
+ {
+  "name": "linkify-ipv4",
+  "markdown": "ping 10.0.0.1 and 1.2.3.4 today"
+ },
+ {
+  "name": "linkify-punycode",
+  "markdown": "besuch b\u00fccher.de und m\u00fcnchen.org heute"
+ },
+ {
+  "name": "linkify-emoji-domain",
+  "markdown": "see \ud83d\ude00.com wow"
+ },
+ {
+  "name": "linkify-xn-label",
+  "markdown": "visit xn--bcher-kva.de and XN--E28H.com now"
+ },
+ {
+  "name": "linkify-email-vs-domain",
+  "markdown": "write to a.com@b.com or c.com ok"
+ },
+ {
+  "name": "linkify-boundaries",
+  "markdown": "(example.com), [test.org], <example.net> done"
+ },
+ {
+  "name": "linkify-preceded",
+  "markdown": "a.example.com x:example.com x/example.com x_example.com x-example.com x@example.com"
+ },
+ {
+  "name": "linkify-trailing-punct",
+  "markdown": "example.com, example.org; example.net! example.biz? example.edu."
+ },
+ {
+  "name": "linkify-escaped-dot",
+  "markdown": "see example\\.com here"
+ },
+ {
+  "name": "linkify-entity-prefix",
+  "markdown": "a&amp;example.com wins"
+ },
+ {
+  "name": "linkify-subdomain-chain",
+  "markdown": "a.b.c.example.com/x-y deep"
+ },
+ {
+  "name": "linkify-quote-path",
+  "markdown": "example.com/'it's' and example.com/a'b end"
+ },
+ {
+  "name": "linkify-underscore-label",
+  "markdown": "ex_ample.com stays plain"
+ },
+ {
+  "name": "linkify-double-dot",
+  "markdown": "example..com nope"
+ },
+ {
+  "name": "linkify-in-link-text",
+  "markdown": "[example.com](https://x.example) linked"
+ },
+ {
+  "name": "linkify-in-code",
+  "markdown": "`example.com` code stays"
+ },
+ {
+  "name": "linkify-in-emphasis",
+  "markdown": "**example.com** and *test.org* styled"
+ },
+ {
+  "name": "linkify-localhost",
+  "markdown": "try localhost and localhost.com here"
+ },
+ {
+  "name": "linkify-unicode-path",
+  "markdown": "example.com/caf\u00e9/menu tasty"
+ },
+ {
+  "name": "linkify-mixed-line",
+  "markdown": "a.com b.org c.net d.edu e.gov"
+ },
+ {
+  "name": "linkify-port-edge",
+  "markdown": "example.com:65535 ok example.com:65536 no example.com:80 yes"
+ },
+ {
+  "name": "linkify-dot-end",
+  "markdown": "go to example.com. Then shop.example.org."
+ },
+ {
+  "name": "linkify-comma-path",
+  "markdown": "example.com/a,b and example.com/a, end"
+ },
+ {
+  "name": "linkify-bracket-path",
+  "markdown": "example.com/a[1]b and example.com/x(y)z end"
+ },
+ {
+  "name": "linkify-scheme-priority",
+  "markdown": "http://a.com and b.com together"
+ },
+ {
+  "name": "linkify-heading",
+  "markdown": "# See example.com heading\n\nBody test.org."
+ },
+ {
+  "name": "linkify-table",
+  "markdown": "| Site | Note |\n| --- | --- |\n| example.com | plain |"
+ },
+ {
+  "name": "linkify-list",
+  "markdown": "- example.com first\n- test.org second"
+ }
+]

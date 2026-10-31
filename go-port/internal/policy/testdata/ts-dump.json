@@ -1,0 +1,296 @@
+{
+  "seeded": true,
+  "schemaVersion": 1,
+  "agents": [
+    {
+      "slug": "agent-one",
+      "name": "Agent One",
+      "scoped": true,
+      "createdAt": 1793423278449,
+      "archivedAt": null
+    },
+    {
+      "slug": "default",
+      "name": "Default (legacy bearer)",
+      "scoped": false,
+      "createdAt": 1793423278449,
+      "archivedAt": null
+    },
+    {
+      "slug": "agent-two",
+      "name": "Agent Two",
+      "scoped": true,
+      "createdAt": 1793423278450,
+      "archivedAt": 1793423278457
+    }
+  ],
+  "grants": {
+    "default": [
+      {
+        "area": "calendar",
+        "op": "read"
+      },
+      {
+        "area": "calendar",
+        "op": "write"
+      },
+      {
+        "area": "docs",
+        "op": "create"
+      },
+      {
+        "area": "docs",
+        "op": "read"
+      },
+      {
+        "area": "docs",
+        "op": "write"
+      },
+      {
+        "area": "drive",
+        "op": "create"
+      },
+      {
+        "area": "drive",
+        "op": "read"
+      },
+      {
+        "area": "sheets",
+        "op": "create"
+      },
+      {
+        "area": "sheets",
+        "op": "read"
+      },
+      {
+        "area": "sheets",
+        "op": "write"
+      }
+    ],
+    "agent-one": [
+      {
+        "area": "docs",
+        "op": "read"
+      },
+      {
+        "area": "drive",
+        "op": "read"
+      }
+    ],
+    "agent-two": [
+      {
+        "area": "calendar",
+        "op": "read"
+      },
+      {
+        "area": "calendar",
+        "op": "write"
+      },
+      {
+        "area": "docs",
+        "op": "create"
+      },
+      {
+        "area": "docs",
+        "op": "read"
+      },
+      {
+        "area": "docs",
+        "op": "write"
+      },
+      {
+        "area": "drive",
+        "op": "create"
+      },
+      {
+        "area": "drive",
+        "op": "read"
+      },
+      {
+        "area": "sheets",
+        "op": "create"
+      },
+      {
+        "area": "sheets",
+        "op": "read"
+      },
+      {
+        "area": "sheets",
+        "op": "write"
+      }
+    ]
+  },
+  "scopes": {
+    "default": [],
+    "agent-one": [
+      {
+        "folderId": "folderBbbbbbbb",
+        "folderName": "B",
+        "isPrimary": true
+      },
+      {
+        "folderId": "folderAaaaaaaa",
+        "folderName": "A",
+        "isPrimary": false
+      }
+    ],
+    "agent-two": [
+      {
+        "folderId": "folderCccccccc",
+        "folderName": "C",
+        "isPrimary": true
+      }
+    ]
+  },
+  "tokens": {
+    "default": [],
+    "agent-one": [
+      {
+        "id": 2,
+        "agent": "agent-one",
+        "prefix": "gws_fixturet",
+        "label": "padded label trimmed over eighty chars zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        "createdAt": 1793423278454,
+        "revokedAt": 1793423278455
+      },
+      {
+        "id": 1,
+        "agent": "agent-one",
+        "prefix": "gws_fixturet",
+        "label": "label one",
+        "createdAt": 1793423278454,
+        "revokedAt": null
+      }
+    ],
+    "agent-two": [
+      {
+        "id": 3,
+        "agent": "agent-two",
+        "prefix": "gws_fixturet",
+        "label": "to-revoke",
+        "createdAt": 1793423278456,
+        "revokedAt": 1793423278457
+      }
+    ]
+  },
+  "audit": [
+    {
+      "id": 3,
+      "ts": 1700000002000,
+      "kind": "admin",
+      "agent": "agent-one",
+      "tool": null,
+      "decision": "mutate",
+      "reason": "grants.set",
+      "resources": [
+        "agent-one"
+      ],
+      "source": "10.0.0.1"
+    },
+    {
+      "id": 2,
+      "ts": 1700000001000,
+      "kind": "auth",
+      "agent": null,
+      "tool": null,
+      "decision": "deny",
+      "reason": "bad_bearer",
+      "resources": [],
+      "source": "10.0.0.1"
+    },
+    {
+      "id": 1,
+      "ts": 1700000000000,
+      "kind": "tool",
+      "agent": "agent-one",
+      "tool": "readDocument",
+      "decision": "allow",
+      "reason": "",
+      "resources": [
+        "file1"
+      ],
+      "source": ""
+    }
+  ],
+  "auditFiltered": [
+    {
+      "id": 1,
+      "ts": 1700000000000,
+      "kind": "tool",
+      "agent": "agent-one",
+      "tool": "readDocument",
+      "decision": "allow",
+      "reason": "",
+      "resources": [
+        "file1"
+      ],
+      "source": ""
+    }
+  ],
+  "log": [
+    [
+      "createAgent:bad-slug",
+      "invalid_slug"
+    ],
+    [
+      "createAgent:empty-name",
+      "invalid_name"
+    ],
+    [
+      "createAgent:exists",
+      "exists"
+    ],
+    [
+      "archive:default-reserved",
+      "reserved"
+    ],
+    [
+      "archive:not-found",
+      "not_found"
+    ],
+    [
+      "grants:not-found",
+      "not_found"
+    ],
+    [
+      "scope:default-reserved",
+      "reserved"
+    ],
+    [
+      "unconfine:has-scopes-early",
+      "has_scopes"
+    ],
+    [
+      "scope:exists",
+      "exists"
+    ],
+    [
+      "scope:remove-missing",
+      "not_found"
+    ],
+    [
+      "agentForTokenHash:active",
+      "agent-one"
+    ],
+    [
+      "agentForTokenHash:revoked",
+      null
+    ],
+    [
+      "agentForTokenHash:unknown",
+      null
+    ],
+    [
+      "prune",
+      1
+    ],
+    [
+      "agentForTokenHash:archived-agent",
+      null
+    ],
+    [
+      "createAgent:archived-reserved",
+      "exists"
+    ]
+  ]
+}
