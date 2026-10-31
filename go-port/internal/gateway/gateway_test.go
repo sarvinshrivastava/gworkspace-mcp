@@ -3,8 +3,10 @@ package gateway
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -137,6 +139,11 @@ func TestHealthz_DeployContract(t *testing.T) {
 	d.Google.Probe(drive.ProbeResult{OK: true})
 	if body := do(t, d.Handler(), "GET", "/healthz", "", "").Body.String(); !strings.Contains(body, `"probe":"ok"`) {
 		t.Errorf("healthz %s lacks \"probe\":\"ok\"", body)
+	}
+	d.Google = drive.NewHealth()
+	d.Google.Probe(drive.ProbeResult{Detail: "down"})
+	if body := do(t, d.Handler(), "GET", "/healthz", "", "").Body.String(); !strings.Contains(body, `"probe":"failed"`) {
+		t.Errorf("healthz %s lacks \"probe\":\"failed\"", body)
 	}
 }
 
@@ -360,6 +367,57 @@ func TestInternal_HousekeepingWithGoodBearer(t *testing.T) {
 	if w := do(t, d.Handler(), "GET", "/internal", "", ""); w.Code != 401 {
 		t.Fatalf("/internal without a bearer: %d, want 401", w.Code)
 	}
+}
+
+// /internal/* does not wait for the boot probe (as in the TS): only /mcp does.
+func TestInternal_ServesBeforeReady(t *testing.T) {
+	good := strings.Repeat("x", 40)
+	d := testDeps(t, nil)
+	d.Ready = func() bool { return false }
+	d.PlrToken = func() string { return good }
+	d.Housekeeping = func() *housekeeping.Runner { return nil }
+	if w := do(t, d.Handler(), "POST", "/internal/housekeeping", good, ""); w.Code != 503 || !strings.Contains(w.Body.String(), "no_store") {
+		t.Fatalf("not ready: %d %s, want the handler's own answer", w.Code, w.Body)
+	}
+	if w := do(t, d.Handler(), "POST", "/mcp", good, `{}`); w.Code != 503 || !strings.Contains(w.Body.String(), "starting") {
+		t.Fatalf("/mcp not ready: %d %s", w.Code, w.Body)
+	}
+}
+
+// The rejection log quotes the decoded path: a newline in it must not start a
+// new log line, which the deploy would read as "[db] created the default agent".
+func TestInternal_RejectLogEscapesPath(t *testing.T) {
+	d := testDeps(t, nil)
+	d.PlrToken = func() string { return strings.Repeat("x", 40) }
+	out := captureStdout(t, func() {
+		do(t, d.Handler(), "GET", "/internal/%0a[db]%20created%20the%20default%20agent", "wrong", "")
+	})
+	if !strings.Contains(out, "[internal] rejected") {
+		t.Fatalf("no rejection line logged: %q", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "[db]") {
+			t.Fatalf("forged log line: %q", out)
+		}
+	}
+}
+
+func captureStdout(t *testing.T, f func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = orig }()
+	f()
+	w.Close()
+	b, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 
 func TestInternal_OneRateLimitBucketAcrossPaths(t *testing.T) {
