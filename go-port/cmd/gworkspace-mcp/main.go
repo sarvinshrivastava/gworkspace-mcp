@@ -265,9 +265,15 @@ func run() error {
 		ClientSecret: vault["GOOGLE_CLIENT_SECRET"],
 		RefreshToken: refreshTokenOf(normalised),
 	}, 30*time.Second, googleHealth.Ok)
-	// A plain write, safe because it precedes boot.Publish: tool calls are
-	// only reached after Ready() loads the published pointer.
+	// A plain write, safe because it precedes boot.MarkReady: tool calls are
+	// only reached after Ready() loads the flag (mcp.go's ready gate).
 	googleTools.Tok = driveClient
+	boot.Publish(&bootState{
+		legacyToken:  vault["GWORKSPACE_MCP_TOKEN"],
+		passwordHash: &passwordHash,
+		plrToken:     plrToken,
+		driveClient:  driveClient,
+	})
 
 	// Boot probe: a revoked or expired grant boots perfectly and then fails
 	// every user action. One cheap call turns that into a line in the log at
@@ -277,12 +283,7 @@ func run() error {
 	cancel()
 	googleHealth.Probe(probeResultOf(probeErr))
 
-	boot.Publish(&bootState{
-		legacyToken:  vault["GWORKSPACE_MCP_TOKEN"],
-		passwordHash: &passwordHash,
-		plrToken:     plrToken,
-		driveClient:  driveClient,
-	})
+	boot.MarkReady()
 	names := make([]string, len(schemas))
 	for i, t := range schemas {
 		names[i] = t.Name

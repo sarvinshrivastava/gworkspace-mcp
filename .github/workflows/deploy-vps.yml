@@ -329,14 +329,18 @@ jobs:
               # token boots fine and fails every call, so surface the boot
               # probe's verdict. The TS image answers 200 before its probe has
               # run ("probe":"unknown"), so poll.
+              # 13 looks, 12 waits: the last fetch is still evaluated, and a
+              # failed fetch keeps the previous body (and its state field).
               probe=""
-              for _ in $(seq 1 12); do
+              for i in $(seq 1 13); do
                 case "$body" in
                   *'"probe":"ok"'*) probe=ok; break ;;
                   *'"probe":"failed"'*) probe=failed; break ;;
                 esac
+                [ "$i" = 13 ] && break
                 sleep 5
-                body=$(healthz)
+                next=$(healthz)
+                [ -n "$next" ] && body="$next"
               done
               case "$probe" in
                 ok) echo "Google credential verified" ;;

@@ -132,7 +132,11 @@ func (d *Deps) Handler() http.Handler {
 	// One guard for every method under /internal/, as the TS mounted its
 	// guard: a non-POST must meet the guard (not a mux 405), and every path
 	// must share one rate-limit bucket.
-	mux.HandleFunc("/internal/", d.withInternalGuard(d.internalRoutes))
+	// "/internal" itself too, or the mux 301s it to "/internal/" before the
+	// guard runs.
+	internal := d.withInternalGuard(d.internalRoutes)
+	mux.HandleFunc("/internal/", internal)
+	mux.HandleFunc("/internal", internal)
 	mux.HandleFunc("POST /mcp", d.mcpPost)
 	mux.HandleFunc("/mcp", d.mcpMethodNotAllowed)
 	return mux

@@ -15,8 +15,17 @@ func TestBootCell_ZeroUntilPublished(t *testing.T) {
 	hash := "scrypt$1$1$1$a$b"
 	client := &drive.Client{}
 	c.Publish(&bootState{legacyToken: "legacy", passwordHash: &hash, plrToken: "plr", driveClient: client})
-	if !c.Ready() || c.LegacyToken() != "legacy" || *c.PasswordHash() != hash || c.PlrToken() != "plr" || c.Drive() != client {
+	if c.LegacyToken() != "legacy" || *c.PasswordHash() != hash || c.PlrToken() != "plr" || c.Drive() != client {
 		t.Fatal("published values not visible")
+	}
+	// Published is not ready: /mcp waits for the boot probe, the dashboard
+	// login and /internal/* do not.
+	if c.Ready() {
+		t.Fatal("ready before MarkReady")
+	}
+	c.MarkReady()
+	if !c.Ready() {
+		t.Fatal("not ready after MarkReady")
 	}
 }
 
@@ -38,5 +47,6 @@ func TestBootCell_ConcurrentReadsDuringPublish(t *testing.T) {
 	}
 	empty := ""
 	c.Publish(&bootState{legacyToken: "legacy", passwordHash: &empty})
+	c.MarkReady()
 	wg.Wait()
 }

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -113,8 +114,29 @@ func TestLoadSchemas_FiltersAndIgnoresUnknown(t *testing.T) {
 	if len(got) != 1 || got[0].Name != "readDocument" {
 		t.Fatalf("got %v", got)
 	}
-	if all, _ := LoadSchemas(pinnedNames(t)); len(all) != 20 {
+	all, err := LoadSchemas(pinnedNames(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 20 {
 		t.Fatalf("full allowlist exposed %d tools, want 20", len(all))
+	}
+}
+
+// The deploy workflow (deploy-vps.yml "Wait for health") matches these exact
+// substrings in the raw body, so the encoding is part of the contract:
+// compact JSON with the keys spelled as here.
+func TestHealthz_DeployContract(t *testing.T) {
+	d := testDeps(t, nil)
+	body := do(t, d.Handler(), "GET", "/healthz", "", "").Body.String()
+	for _, want := range []string{`"db":true`, `"tools":20`, `"probe":"unknown"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("healthz %s lacks %s", body, want)
+		}
+	}
+	d.Google.Probe(drive.ProbeResult{OK: true})
+	if body := do(t, d.Handler(), "GET", "/healthz", "", "").Body.String(); !strings.Contains(body, `"probe":"ok"`) {
+		t.Errorf("healthz %s lacks \"probe\":\"ok\"", body)
 	}
 }
 
@@ -295,6 +317,48 @@ func TestInternal_GuardCoversEveryMethodAndPath(t *testing.T) {
 		if w := do(t, h, c.method, c.path, c.bearer, ""); w.Code != c.want {
 			t.Errorf("%s %s bearer=%t: %d, want %d", c.method, c.path, c.bearer != "", w.Code, c.want)
 		}
+	}
+}
+
+// The bucket keys on the client host: reconnecting (a new source port) must
+// not buy a fresh 10 bearer guesses.
+func TestInternal_RateLimitKeysOnHostNotPort(t *testing.T) {
+	d := testDeps(t, nil)
+	d.PlrToken = func() string { return strings.Repeat("x", 40) }
+	h := d.Handler()
+	var last *httptest.ResponseRecorder
+	for i := 0; i < 11; i++ {
+		r := httptest.NewRequest("POST", "/internal/housekeeping", nil)
+		r.RemoteAddr = fmt.Sprintf("192.0.2.1:%d", 40000+i)
+		r.Header.Set("Authorization", "Bearer wrong")
+		last = httptest.NewRecorder()
+		h.ServeHTTP(last, r)
+	}
+	if last.Code != 429 {
+		t.Fatalf("11th request from new ports: %d, want 429", last.Code)
+	}
+}
+
+func TestInternal_HousekeepingWithGoodBearer(t *testing.T) {
+	dir := t.TempDir()
+	dbFile := filepath.Join(dir, "p.sqlite")
+	store, err := policy.OpenPolicyStore(dbFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	runner := housekeeping.NewRunner(housekeeping.Deps{Audit: audit.New(store), DBFile: dbFile, BackupDir: filepath.Join(dir, "backups")})
+	good := strings.Repeat("x", 40)
+	d := testDeps(t, nil)
+	d.PlrToken = func() string { return good }
+	d.Housekeeping = func() *housekeeping.Runner { return runner }
+	w := do(t, d.Handler(), "POST", "/internal/housekeeping", good, "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"pruned":`) {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	// "/internal" without the slash meets the guard too, not a mux redirect.
+	if w := do(t, d.Handler(), "GET", "/internal", "", ""); w.Code != 401 {
+		t.Fatalf("/internal without a bearer: %d, want 401", w.Code)
 	}
 }
 
