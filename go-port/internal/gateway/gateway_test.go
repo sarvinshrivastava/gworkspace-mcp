@@ -171,7 +171,11 @@ func TestMcp_AuthFailureAuditKeysOnHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	aud := audit.New(store)
 	d := testDeps(t, nil)
 	d.Audit = func() *audit.Audit { return aud }
@@ -353,7 +357,11 @@ func TestInternal_HousekeepingWithGoodBearer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	runner := housekeeping.NewRunner(housekeeping.Deps{Audit: audit.New(store), DBFile: dbFile, BackupDir: filepath.Join(dir, "backups")})
 	good := strings.Repeat("x", 40)
 	d := testDeps(t, nil)
@@ -412,7 +420,9 @@ func captureStdout(t *testing.T, f func()) string {
 	os.Stdout = w
 	defer func() { os.Stdout = orig }()
 	f()
-	w.Close()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
 	b, err := io.ReadAll(r)
 	if err != nil {
 		t.Fatal(err)
